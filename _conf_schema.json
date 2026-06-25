@@ -1,0 +1,183 @@
+{
+    "time_awareness": {
+        "description": "🕐 时间感知设置",
+        "type": "object",
+        "items": {
+            "time_guidance_enabled": {
+                "description": "启用时间感知增强提示词",
+                "type": "bool",
+                "default": true,
+                "hint": "启用后，将固定时间使用指南追加到 system_prompt 末尾，指导 AI 正确处理时间相关表述"
+            },
+            "time_guidance_prompt": {
+                "description": "时间感知增强提示词",
+                "type": "text",
+                "default": "<TIME_GUIDE>\n时间感知规则（必须严格遵守）：\n1. 真实性：下方\"当日事项\"是今日事件、节日、纪念日的唯一可信来源；其他时间细节也禁止编造或推测。\n2. 自然回应：优先使用自然口语（如\"刚才\"、\"大半夜\"、\"好久不见\"）替代数字报时，仅在用户明确询问时提供精确时间。\n3. 状态映射：依据当前时间自然带入人设的生理/情绪状态（如深夜困倦、饭点饥饿、清晨迟钝），不要刻意强调时间数字。\n4. 上下文感知：参考对话历史的时间分布调整语气（多条消息间隔较长可表露想念，刚聊过则保持连贯）；睡眠时段被叫醒时按人设自然表现困意。\n\n当日事项：{calendar_today}\n</TIME_GUIDE>",
+                "hint": "追加到 system_prompt 末尾的固定时间指南。支持 {calendar_today} 占位符（开启日历功能后会在请求时替换为当日事项）。可用 \\n 换行"
+            },
+            "use_astrbot_timezone": {
+                "description": "跟随 AstrBot 时区",
+                "type": "bool",
+                "default": false,
+                "hint": "启用后自动使用 AstrBot 全局设置中的时区。AstrBot 未配置时区时回退到下方时区字段"
+            },
+            "timezone": {
+                "description": "时区",
+                "type": "string",
+                "default": "",
+                "hint": "IANA 时区名称，如 Asia/Shanghai、America/New_York。留空使用系统本地时区。启用上方「跟随 AstrBot 时区」后此项将被忽略"
+            },
+            "sleep_mode_enabled": {
+                "description": "启用睡眠模式",
+                "type": "bool",
+                "default": false,
+                "hint": "启用后，在睡眠时间段内用户发消息时，会将睡眠提示追加到本轮用户消息后"
+            },
+            "sleep_hours": {
+                "description": "睡眠时间段",
+                "type": "string",
+                "default": "22:00-8:00",
+                "hint": "格式：开始时间-结束时间（24小时制），支持跨午夜（如 22:00-8:00）"
+            },
+            "sleep_prompt": {
+                "description": "睡眠时间提示内容",
+                "type": "text",
+                "default": "<SLEEP_MODE>\n当前是睡眠时段，你刚被消息叫醒或正在半梦半醒之间。请按人设自然回应——可带困意、含糊、迟疑、不情愿，但不要拒绝对话；允许偶尔走神、把话说半句、打哈欠。\n</SLEEP_MODE>",
+                "hint": "睡眠时段内追加到本轮用户消息后的提示文本"
+            }
+        }
+    },
+    "calendar": {
+        "description": "📅 时间表（日历事项）设置",
+        "type": "object",
+        "items": {
+            "enable_calendar": {
+                "description": "✅ 启用时间表功能",
+                "type": "bool",
+                "default": false,
+                "hint": "启用后，{calendar_today} 占位符会解析为当天的时间表事项（可用于时间感知提示词与睡眠提示）。关闭时占位符返回 calendar_empty_text"
+            },
+            "calendar_separator": {
+                "description": "➡️ 事项分隔符",
+                "type": "string",
+                "default": "、",
+                "hint": "当天有多条事项时，{calendar_today} 使用此分隔符拼接。例如「、」或「，」"
+            },
+            "calendar_empty_text": {
+                "description": "📭 无事项时的默认文本",
+                "type": "text",
+                "default": "无",
+                "hint": "当天没有任何事项时，{calendar_today} 返回的文本。默认「无」让 LLM 明确知道今日无特殊事件；可改为空字符串或自定义文本"
+            },
+            "ai_generate_provider_id": {
+                "description": "🤖 AI 生成时间表使用的模型（留空跟随主模型）",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider",
+                "hint": "指定 /calendar create 命令所用的模型提供商。留空则使用当前主模型"
+            },
+            "ai_generate_worldview": {
+                "description": "🌍 默认世界观设定（可空）",
+                "type": "text",
+                "default": "",
+                "hint": "/calendar create 命令使用的世界观/主题设定（如「末世废土」「蒸汽朋克都市」）。命令本身不带参数，每次调用都会使用此处的设定重新生成完整日历。留空时命令会拒绝执行。系统提示词由插件内置，无需用户配置"
+            },
+            "enable_builtin_events": {
+                "description": "✅ 启用内置现实日历事件",
+                "type": "bool",
+                "default": true,
+                "hint": "启用后插件自动生成常用的现实日历事件（节日/节气），与用户自定义事件合并显示在 {calendar_today} 中。事件存于 builtin_events.yaml，每年自动重新生成"
+            },
+            "builtin_events": {
+                "description": "📅 内置事件分类开关",
+                "type": "object",
+                "items": {
+                    "legal_holidays": {
+                        "description": "🏷️ 法定节假日（含调休）",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "元旦/春节/清明/劳动节/端午/中秋/国庆。数据来自 chinese_calendar 库（每年更新调休）。正日子当天显示「X 节」，调休日显示「X 节假期」"
+                    },
+                    "traditional": {
+                        "description": "🏮 传统农历节日",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "元宵/龙抬头/上巳/七夕/中元/重阳/寒衣/下元/腊八/小年/除夕"
+                    },
+                    "solar_terms": {
+                        "description": "🌿 二十四节气",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "立春/雨水/.../大寒 共 24 个，每月约 2 个"
+                    },
+                    "political": {
+                        "description": "🏛️ 政治纪念日",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "植树节/五四青年节/教师节/建党节/建军节/抗战胜利纪念日/烈士纪念日/国家公祭日"
+                    },
+                    "international": {
+                        "description": "🌎 国际/西方节日",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "情人节/妇女节/愚人节/儿童节/万圣节/平安夜/圣诞节/母亲节/父亲节/感恩节/复活节"
+                    }
+                }
+            }
+        }
+    },
+    "reminder": {
+        "description": "🔔 主动提醒设置",
+        "type": "object",
+        "items": {
+            "enable_reminder": {
+                "description": "启用主动提醒",
+                "type": "bool",
+                "default": false,
+                "hint": "启用后启动后台调度循环：当日事项在指定时刻主动发送到白名单会话；LLM 也可通过 schedule_followup 工具自行安排后续主动消息"
+            },
+            "reminder_targets": {
+                "description": "提醒目标会话白名单",
+                "type": "list",
+                "default": [],
+                "hint": "每行一个完整 UMO 字符串（如 aiocqhttp:GroupMessage:123456789 或 aiocqhttp:FriendMessage:987654321）。仅这些会话会收到主动提醒；LLM 在非白名单会话调用 schedule_followup 会被拒绝"
+            },
+            "reminder_time": {
+                "description": "当日事项发送时刻",
+                "type": "string",
+                "default": "09:00",
+                "hint": "格式 HH:MM（24 小时制）。每日 0 点扫描当天事项，在此时刻发到白名单会话"
+            },
+            "reminder_max_late_minutes": {
+                "description": "迟到容忍窗口（分钟）",
+                "type": "int",
+                "default": 60,
+                "hint": "任务超过 fire_at 多少分钟内仍会补发（并附加迟到提示词给 LLM）；超过此窗口则丢弃该任务"
+            },
+            "reminder_late_prompt": {
+                "description": "迟到提示词",
+                "type": "text",
+                "default": "<LATE_PROMPT>\n你刚才承诺/计划在 {delay_minutes} 分钟前发这条消息，但错过了。请用符合人设的语气自然带出\"来晚了/让你等了\"等感受，不要刻意道歉过多，然后继续完成原本要说的话。\n</LATE_PROMPT>",
+                "hint": "补发任务时附加给 LLM 的迟到提示词。{delay_minutes} 在补发时替换为实际迟到分钟数。仅 use_llm=true 的任务会附加；直接发文本（use_llm=false）的任务不附加，避免用户看到 XML 标签"
+            },
+            "followup_tool_enabled": {
+                "description": "向 LLM 注册 schedule_followup 工具",
+                "type": "bool",
+                "default": true,
+                "hint": "启用后 LLM 可在承诺\"X 分钟后再说\"时主动调用工具安排后续主动消息。关闭则 LLM 看不到此工具"
+            },
+            "include_history": {
+                "description": "主动提醒携带对话历史",
+                "type": "bool",
+                "default": true,
+                "hint": "启用后，主动提醒调 LLM 时会从 chat_memory 插件拉取该会话最近的对话作为 contexts 传入（需要安装 chat_memory 插件；拉不到时降级为不带历史）"
+            },
+            "history_rounds": {
+                "description": "对话历史轮数",
+                "type": "int",
+                "default": 10,
+                "hint": "从 chat_memory 拉取的对话轮数（每轮 = 1 条用户消息 + 1 条 AI 回复 = 2 条记录）。范围 1-50"
+            }
+        }
+    }
+}
