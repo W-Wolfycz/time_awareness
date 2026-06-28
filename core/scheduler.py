@@ -24,11 +24,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
-from astrbot.api import logger
+from ..log import logger, tag
 
 from ._datafile import atomic_write_yaml, load_mapping
 
-_PREFIX = "[time_awareness]"
 
 TASKS_FILE_NAME = "reminder_tasks.yaml"
 TASKS_DATA_VERSION = 1
@@ -52,9 +51,7 @@ class Task:
     session: str
     fire_at: datetime.datetime
     hint: str = ""
-    use_llm: bool = True
-    calendar_event_id: str = ""
-    calendar_event_text: str = ""
+    target_user_id: str = ""  # followup 群聊场景的 at 目标（承诺发起人）
     sent: bool = False
     given_up: bool = False
     created_at: datetime.datetime = field(default_factory=datetime.datetime.now)
@@ -68,9 +65,7 @@ class Task:
                 session=str(raw["session"]),
                 fire_at=datetime.datetime.fromisoformat(str(raw["fire_at"])),
                 hint=str(raw.get("hint", "")),
-                use_llm=bool(raw.get("use_llm", True)),
-                calendar_event_id=str(raw.get("calendar_event_id", "")),
-                calendar_event_text=str(raw.get("calendar_event_text", "")),
+                target_user_id=str(raw.get("target_user_id", "")),
                 sent=bool(raw.get("sent", False)),
                 given_up=bool(raw.get("given_up", False)),
                 created_at=datetime.datetime.fromisoformat(
@@ -78,7 +73,7 @@ class Task:
                 ),
             )
         except (KeyError, ValueError) as e:
-            logger.warning(f"{_PREFIX} ⚠️ 跳过无效任务条目: {e}")
+            logger.warning(f"{tag()} ⚠️ 跳过无效任务条目: {e}")
             return None
 
     def to_dict(self) -> dict:
@@ -88,9 +83,7 @@ class Task:
             "session": self.session,
             "fire_at": self.fire_at.isoformat(),
             "hint": self.hint,
-            "use_llm": self.use_llm,
-            "calendar_event_id": self.calendar_event_id,
-            "calendar_event_text": self.calendar_event_text,
+            "target_user_id": self.target_user_id,
             "sent": self.sent,
             "given_up": self.given_up,
             "created_at": self.created_at.isoformat(),
@@ -114,7 +107,15 @@ class ReminderScheduler:
         self,
         data_dir: str,
         trigger_callback: Callable[[DueGroup], Awaitable[None]],
+        now_provider: Optional[Callable[[], datetime.datetime]] = None,
     ):
+        """``now_provider`` 用于注入与 ``fire_at`` 同时区的 now。
+
+        ``fire_at`` 通常由 main.py 的 ``get_now()`` 生成——配置了时区时是
+        aware datetime。若 scheduler 内部用裸 ``datetime.now()``（naive），
+        两者比较会抛 ``TypeError: can't compare offset-naive and offset-aware``。
+        默认回退到 ``datetime.now()`` 兼容旧调用方。
+        """
         self.data_dir = data_dir
         self._trigger_callback = trigger_callback
         self._tasks: list[Task] = []
@@ -123,6 +124,11 @@ class ReminderScheduler:
         self._wakeup_event: Optional[asyncio.Event] = None  # 延迟到事件循环里创建
         self._stopped = True
         self._max_late_minutes_value: int = 60
+        self._now_provider = now_provider or (lambda: datetime.datetime.now())
+
+    def _now(self) -> datetime.datetime:
+        """与 fire_at 同时区的当前时间。"""
+        return self._now_provider()
 
     # ==================== 配置 ====================
 
@@ -148,7 +154,7 @@ class ReminderScheduler:
             if t is not None:
                 loaded.append(t)
         self._tasks = loaded
-        logger.info(f"{_PREFIX} ✅ 已加载 {len(loaded)} 条提醒任务")
+        logger.info(f"{tag()} ✅ 已加载 {len(loaded)} 条提醒任务")
 
     def save(self) -> bool:
         """原子性写入任务列表到 YAML（仅持久化未完成项）。"""
@@ -164,7 +170,7 @@ class ReminderScheduler:
             header="time_awareness 提醒任务（自动生成，可手动编辑）",
         )
         if not ok:
-            logger.error(f"{_PREFIX} ❌ 提醒任务保存失败")
+            logger.error(f"{tag()} ❌ 提醒任务保存失败")
         return ok
 
     # ==================== 入队 ====================
@@ -173,24 +179,20 @@ class ReminderScheduler:
         self,
         session: str,
         fire_at: datetime.datetime,
-        event_id: str,
-        event_text: str,
     ) -> Task:
+        """入队当日提醒任务（每 session 每天一条；事件内容在 fire 时动态查询）。"""
         task = Task(
             id=uuid.uuid4().hex,
             kind="calendar",
             session=session,
             fire_at=fire_at,
-            use_llm=True,  # 日历提醒默认走 LLM
-            calendar_event_id=event_id,
-            calendar_event_text=event_text,
         )
         self._tasks.append(task)
         self.save()
         self._wake()
         logger.debug(
-            f"{_PREFIX} 📅 已入队日历提醒: session={session} "
-            f"fire_at={fire_at.isoformat()} text={event_text[:30]}"
+            f"{tag()} 📅 已入队日历提醒: session={session} "
+            f"fire_at={fire_at.isoformat()}"
         )
         return task
 
@@ -199,6 +201,7 @@ class ReminderScheduler:
         session: str,
         fire_at: datetime.datetime,
         hint: str,
+        target_user_id: str = "",
     ) -> Task:
         task = Task(
             id=uuid.uuid4().hex,
@@ -206,15 +209,14 @@ class ReminderScheduler:
             session=session,
             fire_at=fire_at,
             hint=hint,
-            # use_llm 不再设置：dataclass 默认 True，老任务文件的 False 值
-            # 仍能加载（向后兼容），但 _on_due 已统一走 LLM 路，不再分支
+            target_user_id=target_user_id,
         )
         self._tasks.append(task)
         self.save()
         self._wake()
         logger.debug(
-            f"{_PREFIX} ⏰ 已入队 LLM 后续任务: session={session} "
-            f"fire_at={fire_at.isoformat()}"
+            f"{tag()} ⏰ 已入队 LLM 后续任务: session={session} "
+            f"fire_at={fire_at.isoformat()} target_user_id={target_user_id or '-'}"
         )
         return task
 
@@ -229,7 +231,7 @@ class ReminderScheduler:
         self._stopped = False
         self._wakeup_event.clear()
         self._loop_task = asyncio.create_task(self._loop())
-        logger.info(f"{_PREFIX} ✅ 提醒调度循环已启动")
+        logger.info(f"{tag()} ✅ 提醒调度循环已启动")
 
     async def stop(self) -> None:
         """停止调度循环（等待当前 tick 完成）。"""
@@ -241,7 +243,7 @@ class ReminderScheduler:
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 self._loop_task.cancel()
             self._loop_task = None
-        logger.info(f"{_PREFIX} ✅ 提醒调度循环已停止")
+        logger.info(f"{tag()} ✅ 提醒调度循环已停止")
 
     def _wake(self) -> None:
         """唤醒调度循环（新任务入队或停止时调用）。"""
@@ -252,7 +254,7 @@ class ReminderScheduler:
         """主循环：算到下次任务的时间 → 可中断睡眠 → 处理到期。"""
         while not self._stopped:
             try:
-                now = datetime.datetime.now()
+                now = self._now()
                 # 先清理过期任务
                 self._cleanup_expired(now)
 
@@ -279,17 +281,17 @@ class ReminderScheduler:
                     break
 
                 # 处理到期任务
-                now = datetime.datetime.now()
+                now = self._now()
                 groups = self._pop_due(now)
                 for group in groups:
                     try:
                         await self._trigger_callback(group)
                     except Exception as e:
                         logger.error(
-                            f"{_PREFIX} ❌ 触发任务失败 session={group.session}: {e}"
+                            f"{tag()} ❌ 触发任务失败 session={group.session}: {e}"
                         )
             except Exception as e:
-                logger.error(f"{_PREFIX} ❌ 调度循环异常: {e}")
+                logger.error(f"{tag()} ❌ 调度循环异常: {e}")
                 await asyncio.sleep(MIN_SLEEP_SECONDS)
 
     # ==================== 到期任务处理 ====================
@@ -306,7 +308,7 @@ class ReminderScheduler:
                 t.given_up = True
                 count += 1
                 logger.warning(
-                    f"{_PREFIX} ⚠️ 任务过期丢弃: id={t.id[:8]} kind={t.kind} "
+                    f"{tag()} ⚠️ 任务过期丢弃: id={t.id[:8]} kind={t.kind} "
                     f"session={t.session} fire_at={t.fire_at.isoformat()} "
                     f"(超出 {max_late} 分钟容忍窗口)"
                 )
@@ -359,14 +361,13 @@ class ReminderScheduler:
     # ==================== 日历扫描辅助 ====================
 
     def has_calendar_task_for_session_today(
-        self, session: str, event_id: str, today: datetime.date
+        self, session: str, today: datetime.date
     ) -> bool:
-        """检查某 session + event 在今天是否已入队（避免重复入队）。"""
+        """检查某 session 在今天是否已入队日历提醒（避免重复入队）。"""
         for t in self._tasks:
             if (
                 t.kind == "calendar"
                 and t.session == session
-                and t.calendar_event_id == event_id
                 and t.fire_at.date() == today
                 and not t.given_up
             ):
@@ -376,3 +377,51 @@ class ReminderScheduler:
     def all_pending(self) -> list:
         """调试用：列出所有未处理任务（已 sent/given_up 的不算）。"""
         return [t for t in self._tasks if not t.sent and not t.given_up]
+
+    def cancel_task(self, task_id: str) -> bool:
+        """按 id 取消未触发任务（标记 given_up=True 并持久化，唤醒调度循环）。
+
+        唤醒的目的是让调度循环重新计算下次睡眠——否则它会为这条已取消
+        的任务守候到原 fire_at 才醒来。
+
+        Returns:
+            True=已取消；False=未找到/已 sent/已 given_up。
+        """
+        for t in self._tasks:
+            if t.id == task_id and not t.sent and not t.given_up:
+                t.given_up = True
+                self.save()
+                self._wake()
+                logger.info(
+                    f"{tag()} 🚫 任务已取消: id={t.id[:8]} kind={t.kind} "
+                    f"session={t.session} fire_at={t.fire_at.isoformat()}"
+                )
+                return True
+        return False
+
+    def list_pending_detailed(self) -> list:
+        """返回 pending 任务的序列化 dict 列表（按 fire_at 升序）。
+
+        供 webui 任务页消费，每条字段：
+        - id: 任务 uuid hex
+        - kind: "calendar" | "followup"
+        - session: UMO
+        - fire_at_iso: 触发时间 iso 字符串（aware datetime，前端原样展示）
+        - hint: followup 的承诺内容（calendar 为空）
+        - target_user_id: followup 群聊的 at 目标（calendar 为空）
+        - created_at_iso: 入队时间 iso 字符串
+        """
+        pending = self.all_pending()
+        pending.sort(key=lambda t: t.fire_at)
+        return [
+            {
+                "id": t.id,
+                "kind": t.kind,
+                "session": t.session,
+                "fire_at_iso": t.fire_at.isoformat(),
+                "hint": t.hint,
+                "target_user_id": t.target_user_id,
+                "created_at_iso": t.created_at.isoformat(),
+            }
+            for t in pending
+        ]

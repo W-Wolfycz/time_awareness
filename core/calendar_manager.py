@@ -14,7 +14,7 @@ import os
 import uuid
 
 import yaml
-from astrbot.api import logger
+from ..log import logger, tag
 
 from ._datafile import (
     atomic_write_yaml,
@@ -30,7 +30,6 @@ from .calendar_store import (
     valid_month_day,
 )
 
-_PREFIX = "[time_awareness]"
 
 CALENDAR_FILE_NAME = "calendar_data.yaml"
 LEGACY_CALENDAR_FILE_NAME = "calendar_data.json"
@@ -112,7 +111,7 @@ class CalendarManager:
             seen_ids.add(event["id"])
             normalized.append(event)
             if len(normalized) >= MAX_EVENTS:
-                logger.warning(f"{_PREFIX} ⚠️ 时间表事项超过上限 {MAX_EVENTS}，已截断")
+                logger.warning(f"{tag()} ⚠️ 时间表事项超过上限 {MAX_EVENTS}，已截断")
                 break
         return normalized
 
@@ -129,7 +128,7 @@ class CalendarManager:
 
             if not os.path.exists(calendar_file):
                 calendar_store.set_events([])
-                logger.info(f"{_PREFIX} ℹ️ 暂无时间表数据文件（首次运行）")
+                logger.info(f"{tag()} ℹ️ 暂无时间表数据文件（首次运行）")
                 return
 
             data = load_mapping(calendar_file)
@@ -138,9 +137,9 @@ class CalendarManager:
 
             events = self._normalize_events(data.get("events", []))
             calendar_store.set_events(events)
-            logger.info(f"{_PREFIX} ✅ 已加载 {len(events)} 条时间表事项")
+            logger.info(f"{tag()} ✅ 已加载 {len(events)} 条时间表事项")
         except (FileNotFoundError, OSError) as e:
-            logger.info(f"{_PREFIX} ℹ️ 时间表加载: {e}")
+            logger.warning(f"{tag()} ⚠️ 时间表加载失败: {e}")
 
     def save(self) -> bool:
         """将内存单例中的事项原子性写入文件。"""
@@ -153,10 +152,10 @@ class CalendarManager:
                 header="time_awareness 时间表数据（自动生成，可手动编辑）",
             )
             if ok:
-                logger.debug(f"{_PREFIX} ✅ 时间表已保存到: {calendar_file}")
+                logger.debug(f"{tag()} ✅ 时间表已保存到: {calendar_file}")
             return ok
         except Exception as e:
-            logger.error(f"{_PREFIX} ❌ 时间表保存错误: {e}")
+            logger.error(f"{tag()} ❌ 时间表保存错误: {e}")
             return False
 
     def _build_payload(self) -> dict:
@@ -177,7 +176,7 @@ class CalendarManager:
     def add_event(self, raw: dict) -> dict | None:
         """新增一条事项；成功返回创建后的事项，失败返回 None。"""
         if len(calendar_store.events) >= MAX_EVENTS:
-            logger.warning(f"{_PREFIX} ⚠️ 时间表事项已达上限 {MAX_EVENTS}，拒绝新增")
+            logger.warning(f"{tag()} ⚠️ 时间表事项已达上限 {MAX_EVENTS}，拒绝新增")
             return None
         payload = dict(raw or {})
         payload.pop("id", None)
@@ -249,7 +248,7 @@ class CalendarManager:
                 if not (e.get("year") == year and e.get("month") == month)
             ]
         else:
-            logger.warning(f"{_PREFIX} ⚠️ 非法的清除范围: scope={scope}")
+            logger.warning(f"{tag()} ⚠️ 非法的清除范围: scope={scope}")
             return 0
 
         removed_count = len(before) - len(kept)
@@ -321,7 +320,7 @@ class CalendarManager:
             merged = before + incoming
             if len(merged) > MAX_EVENTS:
                 merged = merged[:MAX_EVENTS]
-                logger.warning(f"{_PREFIX} ⚠️ 导入后超过上限 {MAX_EVENTS}，已截断")
+                logger.warning(f"{tag()} ⚠️ 导入后超过上限 {MAX_EVENTS}，已截断")
 
         calendar_store.set_events(merged)
         if not self.save():

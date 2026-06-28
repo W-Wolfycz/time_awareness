@@ -16,8 +16,10 @@ time_awareness — 时间感知与智能日历
 import asyncio
 import datetime
 import os
+import random
 
-from astrbot.api import AstrBotConfig, logger
+from astrbot.api import AstrBotConfig
+from .log import logger, configure as configure_log, tag
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
@@ -29,6 +31,7 @@ from .constants import (
 )
 from .core.builtin_events import (
     ALL_CATEGORIES,
+    CATEGORY_ALMANAC,
     CATEGORY_LEGAL,
     CATEGORY_POLITICAL,
     CATEGORY_INTERNATIONAL,
@@ -45,8 +48,8 @@ from .llm.calendar_generator import (
     generate_calendar_events,
 )
 from .utils.time_utils import get_now, get_sleep_prompt_if_active, get_tz
+from .web_api import register_web_apis
 
-_PREFIX = "[time_awareness]"
 PLUGIN_DATA_DIR_NAME = "time_awareness"
 
 
@@ -57,6 +60,14 @@ class CalendarPlusPlugin(Star):
         super().__init__(context)
         self.config = config or {}
 
+        # 日志提级：debug → info（参照 chat_memory 的 debug_to_info 模式）
+        # 日志前缀带 bot 实例标识：区分多 bot 共存场景（参照 emotion_favour）
+        log_cfg = self.config.get("log", {})
+        configure_log(
+            debug_to_info=log_cfg.get("debug_to_info", False),
+            log_with_bot_id=log_cfg.get("log_with_bot_id", False),
+        )
+
         # 数据目录
         try:
             self.data_dir = str(StarTools.get_data_dir(PLUGIN_DATA_DIR_NAME))
@@ -65,20 +76,25 @@ class CalendarPlusPlugin(Star):
             os.makedirs(base, exist_ok=True)
             self.data_dir = base
             logger.warning(
-                f"{_PREFIX} ⚠️ StarTools.get_data_dir 不可用，回退到 {base}: {e}"
+                f"{tag()} ⚠️ StarTools.get_data_dir 不可用，回退到 {base}: {e}"
             )
 
         self.calendar_manager = CalendarManager(self.data_dir)
         self.builtin_manager = BuiltinManager(self.data_dir)
-        # 调度器：trigger_callback 委托给 self._on_due
-        self.scheduler = ReminderScheduler(self.data_dir, self._on_due)
+        # 调度器：trigger_callback 委托给 self._on_due；
+        # now_provider 让 scheduler 用与 fire_at 同时区的 now（避免 aware/naive 比较报错）
+        self.scheduler = ReminderScheduler(
+            self.data_dir,
+            self._on_due,
+            now_provider=lambda: get_now(self.config, self._astrbot_config()),
+        )
         self._apply_reminder_config()
         # 每日 0 点扫描当天事项的 asyncio task
         self._daily_scan_task: asyncio.Task | None = None
         # chat_memory 实例缓存（成功解析后缓存；失败不缓存以便下次重试）
         self._chat_memory = None
 
-        logger.info(f"{_PREFIX} 插件已初始化，数据目录: {self.data_dir}")
+        logger.info(f"{tag()} 插件已初始化，数据目录: {self.data_dir}")
 
     async def initialize(self):
         """AstrBot 启动时调用：加载数据 + 启动调度。"""
@@ -91,14 +107,14 @@ class CalendarPlusPlugin(Star):
             categories = self._enabled_builtin_categories()
             if categories:
                 count = self.builtin_manager.ensure_fresh(year, categories)
-                logger.info(f"{_PREFIX} 📅 内置事件已就绪: {count} 条 (year={year})")
+                logger.info(f"{tag()} 📅 内置事件已就绪: {count} 条 (year={year})")
                 # 加载到内存单例
                 builtin_data = self.builtin_manager.load_raw()
                 calendar_store.set_builtin_events(builtin_data.get("events") or [])
             else:
                 calendar_store.set_builtin_events([])
         except Exception as e:
-            logger.error(f"{_PREFIX} ❌ 内置事件初始化失败: {e}")
+            logger.error(f"{tag()} ❌ 内置事件初始化失败: {e}")
             calendar_store.set_builtin_events([])
 
         self._apply_reminder_config()
@@ -112,7 +128,10 @@ class CalendarPlusPlugin(Star):
             # 启动每日 0 点扫描循环
             self._daily_scan_task = asyncio.create_task(self._daily_scan_loop())
 
-        logger.info(f"{_PREFIX} ✅ 初始化完成")
+        # 注册 Plugin Pages 后端 API（鉴权继承 AstrBot 主 webui）
+        register_web_apis(self.context, self)
+
+        logger.info(f"{tag()} ✅ 初始化完成")
 
     async def terminate(self):
         """AstrBot 卸载/关闭时调用：停调度循环 + 每日扫描。"""
@@ -123,13 +142,13 @@ class CalendarPlusPlugin(Star):
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                logger.warning(f"{_PREFIX} ⚠️ 每日扫描 task 停止异常: {e}")
+                logger.warning(f"{tag()} ⚠️ 每日扫描 task 停止异常: {e}")
             self._daily_scan_task = None
         try:
             await self.scheduler.stop()
         except Exception as e:
-            logger.warning(f"{_PREFIX} ⚠️ 调度器停止异常: {e}")
-        logger.info(f"{_PREFIX} ✅ 已终止")
+            logger.warning(f"{tag()} ⚠️ 调度器停止异常: {e}")
+        logger.info(f"{tag()} ✅ 已终止")
 
     async def _daily_scan_loop(self):
         """每日 0 点扫今天的事项入队 + 跨年自动重新生成内置事件。"""
@@ -150,10 +169,10 @@ class CalendarPlusPlugin(Star):
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.error(f"{_PREFIX} ❌ 每日扫描异常（继续循环）: {e}")
+                    logger.error(f"{tag()} ❌ 每日扫描异常（继续循环）: {e}")
                     await asyncio.sleep(60)
         except asyncio.CancelledError:
-            logger.info(f"{_PREFIX} 每日扫描循环已取消")
+            logger.info(f"{tag()} 每日扫描循环已取消")
 
     def _check_builtin_fresh(self) -> None:
         """检查内置事件是否需要重新生成（跨年或分类变更）。"""
@@ -169,11 +188,11 @@ class CalendarPlusPlugin(Star):
                 builtin_data = self.builtin_manager.load_raw()
                 calendar_store.set_builtin_events(builtin_data.get("events") or [])
                 logger.info(
-                    f"{_PREFIX} 📅 跨年/配置变更自动 regen 内置事件: "
+                    f"{tag()} 📅 跨年/配置变更自动 regen 内置事件: "
                     f"year={now.year} events={count}"
                 )
         except Exception as e:
-            logger.error(f"{_PREFIX} ❌ 内置事件跨年 regen 失败: {e}")
+            logger.error(f"{tag()} ❌ 内置事件跨年 regen 失败: {e}")
 
     # ==================== 提醒配置 ====================
 
@@ -205,7 +224,7 @@ class CalendarPlusPlugin(Star):
                 group.session, group.tasks, group.is_late, group.late_minutes
             )
         except Exception as e:
-            logger.error(f"{_PREFIX} ❌ _on_due 异常 session={group.session}: {e}")
+            logger.error(f"{tag()} ❌ _on_due 异常 session={group.session}: {e}")
 
     async def _fire_with_llm(
         self,
@@ -221,7 +240,14 @@ class CalendarPlusPlugin(Star):
         - contexts（对话历史）= 从 chat_memory 插件按 (umo, cid) 拉取，不按用户过滤
           （群聊场景：整个群的所有人混合历史）。CM 未安装 / 拉取失败 → 降级为不带历史
         - prompt（本轮 user）= 各任务的提示文本拼接 + 迟到提示（如迟到）
+
+        日历任务的内容**不**使用 task 入队时的快照——到点动态查 store。
+        这样用户在 0 点后对日历事件 / 内置分类开关的任何改动都能在 fire 时反映。
         """
+        # 若有日历任务：先确保内置事件新鲜（应对 0 点后用户改分类开关的情况）
+        if any(t.kind == "calendar" for t in tasks):
+            self._check_builtin_fresh()
+
         # ---- 1. 构造 system_prompt ----
         system_parts = []
 
@@ -232,7 +258,7 @@ class CalendarPlusPlugin(Star):
             if persona_prompt:
                 system_parts.append(persona_prompt)
         except Exception as e:
-            logger.warning(f"{_PREFIX} ⚠️ 获取人设失败 session={session}: {e}")
+            logger.warning(f"{tag()} ⚠️ 获取人设失败 session={session}: {e}")
 
         # 时间引导 prompt（time_awareness 自己的）
         guidance = self._resolve_placeholders(self._effective_time_guidance_prompt())
@@ -250,22 +276,43 @@ class CalendarPlusPlugin(Star):
         contexts = await self._fetch_history_contexts(session)
 
         # ---- 3. 构造本轮 prompt ----
+        # 日历任务到点动态查询当日事件（不依赖 task 入队时的快照，
+        # 这样用户在 0 点后对日历的任何改动都能在 fire 时反映）
         parts = []
+        calendar_added = False
         for t in tasks:
             if t.kind == "calendar":
-                parts.append(f"今天是 {t.calendar_event_text}，可自然提一下")
+                if calendar_added:
+                    continue  # 同 group 多条 calendar task 只查一次
+                calendar_added = True
+                now_date = get_now(self.config, self._astrbot_config()).date()
+                today_events = calendar_store.events_for_date(
+                    now_date.year, now_date.month, now_date.day
+                )
+                texts = [str(e.get("text", "")).strip() for e in today_events]
+                texts = [t for t in texts if t]
+                if texts:
+                    parts.append(f"今天是 {'、'.join(texts)}，可自然提一下")
             elif t.kind == "followup":
                 if t.hint:
                     parts.append(f"你之前承诺过：{t.hint}。现在到点了，请继续")
                 else:
                     parts.append("你之前承诺过现在到点了，请按当时承诺继续")
+
         prompt = "\n".join(parts)
+        if not prompt.strip():
+            # 当日事项为空且无 followup 提示 → 无内容可发，跳过
+            logger.info(f"{tag()} ℹ️ 跳过空提醒 session={session} tasks={len(tasks)}")
+            return
 
         if is_late:
             late_text = self._late_prompt().replace(
                 "{delay_minutes}", str(late_minutes)
             )
             prompt = f"{prompt}\n\n{late_text}"
+
+        # 多段输出格式提示：让 LLM 用空行分段，发送时按 \n 切成独立消息
+        prompt = f"{prompt}\n\n（如需分多段表达，用空行分隔，每段将作为独立消息发出）"
 
         # ---- 4. 调 LLM ----
         try:
@@ -275,23 +322,51 @@ class CalendarPlusPlugin(Star):
             }
             if contexts:
                 llm_kwargs["contexts"] = contexts
+            # AstrBot 4.25+ 把 chat_provider_id 改成必填：配置了就用配置，否则回会话默认 provider
+            provider_id = (self.config.get("reminder", {}).get("reminder_provider_id") or "").strip()
+            if not provider_id:
+                try:
+                    provider_id = (await self.context.get_current_chat_provider_id(umo=session) or "").strip()
+                except Exception as e:
+                    logger.warning(f"{tag()} ⚠️ 获取默认 provider 失败 session={session}: {e}")
+            if not provider_id:
+                logger.error(f"{tag()} ❌ 无法确定 provider，跳过 session={session}")
+                return
+            llm_kwargs["chat_provider_id"] = provider_id
             llm_response = await self.context.llm_generate(**llm_kwargs)
             if not llm_response or llm_response.role != "assistant":
-                logger.warning(
-                    f"{_PREFIX} ⚠️ LLM 响应异常 session={session}: {llm_response}"
+                logger.error(
+                    f"{tag()} ❌ LLM 响应异常 session={session}: {llm_response}"
                 )
                 return
             reply = (llm_response.completion_text or "").strip()
             if not reply:
-                logger.warning(f"{_PREFIX} ⚠️ LLM 返回空回复 session={session}")
+                logger.warning(f"{tag()} ⚠️ LLM 返回空回复 session={session}")
                 return
-            await self.context.send_message(session, _build_text_chain(reply))
+            # 群聊 + followup + 有 target 时前置 At；calendar 群发不 at，私聊一对一无需 at
+            is_group = "GroupMessage" in session
+            at_uid = ""
+            if is_group:
+                for t in tasks:
+                    if t.kind == "followup" and t.target_user_id:
+                        at_uid = t.target_user_id
+                        break
+
+            # 按空行切段发送（首段带 At），跳过空段；段间随机延迟 0.5-2s 模拟打字
+            segments = [s.strip() for s in reply.split("\n") if s.strip()]
+            for i, seg in enumerate(segments):
+                await self.context.send_message(
+                    session, _build_chain(seg, at_uid if i == 0 else "")
+                )
+                if i < len(segments) - 1:
+                    await asyncio.sleep(random.uniform(0.5, 2.0))
             logger.info(
-                f"{_PREFIX} ✅ LLM 触发已发: session={session} tasks={len(tasks)} "
-                f"late={is_late} history={len(contexts)}"
+                f"{tag()} ✅ LLM 触发已发: session={session} tasks={len(tasks)} "
+                f"late={is_late} history={len(contexts)} at={at_uid or '-'} "
+                f"segments={len(segments)} provider={provider_id or 'main'}"
             )
         except Exception as e:
-            logger.error(f"{_PREFIX} ❌ LLM 触发失败 session={session}: {e}")
+            logger.error(f"{tag()} ❌ LLM 触发失败 session={session}: {e}")
 
     async def _fetch_history_contexts(self, session: str) -> list:
         """从 chat_memory 插件拉取该会话最近 N 轮对话历史，作为 llm_generate 的 contexts。
@@ -317,23 +392,23 @@ class CalendarPlusPlugin(Star):
             cid = await self.context.conversation_manager.get_curr_conversation_id(session)
         except Exception as e:
             logger.warning(
-                f"{_PREFIX} ⚠️ 获取 conversation_id 失败 session={session}: {e}"
+                f"{tag()} ⚠️ 获取 conversation_id 失败 session={session}: {e}"
             )
             return []
         if not cid:
-            logger.debug(f"{_PREFIX} 无 conversation_id，跳过历史拉取 session={session}")
+            logger.debug(f"{tag()} 无 conversation_id，跳过历史拉取 session={session}")
             return []
 
         cm = self._resolve_chat_memory()
         if cm is None:
-            logger.debug(f"{_PREFIX} chat_memory 未安装，跳过历史拉取")
+            logger.debug(f"{tag()} chat_memory 未安装，跳过历史拉取")
             return []
 
         try:
             records = await cm.query_history(session, cid, None, limit)
         except Exception as e:
             logger.warning(
-                f"{_PREFIX} ⚠️ 从 chat_memory 拉取历史失败 session={session}: {e}"
+                f"{tag()} ⚠️ 从 chat_memory 拉取历史失败 session={session}: {e}"
             )
             return []
 
@@ -344,9 +419,10 @@ class CalendarPlusPlugin(Star):
             if not role or not content:
                 continue
             # 截取前 16 字符 "YYYY-MM-DD HH:MM"（CM 存的可能是完整 datetime 字符串）
+            # 用 <time> XML 标签包裹而非方括号前缀，避免 LLM 把时间戳当成正文格式模仿
             created = str(r.get("created_at", ""))[:16].strip()
             if created:
-                contexts.append({"role": role, "content": f"[{created}] {content}"})
+                contexts.append({"role": role, "content": f"<time>{created}</time> {content}"})
             else:
                 contexts.append({"role": role, "content": content})
         return contexts
@@ -355,7 +431,6 @@ class CalendarPlusPlugin(Star):
         """定位 chat_memory 插件实例。AstrBot 注册表 → sys.modules fallback。
 
         成功后缓存到 ``self._chat_memory``；失败不缓存以便下次重试。
-        与 emotion_favour / llm_sentinel 的解析逻辑保持一致。
         """
         if self._chat_memory is not None:
             return self._chat_memory
@@ -383,20 +458,21 @@ class CalendarPlusPlugin(Star):
     # ==================== 每日日历扫描 ====================
 
     def _scan_and_enqueue_today_events(self) -> int:
-        """扫今天的日历事项，对每个白名单 session 入队（已入队的不重复）。"""
+        """为每个白名单 session 入队今日提醒（每 session 一条；事件内容在 fire 时查）。
+
+        注意：不在扫描阶段读取事件——用户在 0 点后任何对日历/分类的改动
+        （add/del/create/import/builtin_regen/开关分类）都会被 fire 时的动态查询覆盖。
+        """
         reminder_cfg = self.config.get("reminder", {})
         if not reminder_cfg.get("enable_reminder", False):
             return 0
         targets = self._reminder_targets()
         if not targets:
-            logger.warning(f"{_PREFIX} ⚠️ reminder 启用但 reminder_targets 为空，跳过扫描")
+            logger.warning(f"{tag()} ⚠️ reminder 启用但 reminder_targets 为空，跳过扫描")
             return 0
 
         now = get_now(self.config, self._astrbot_config())
         today = now.date()
-        today_events = calendar_store.events_for_date(today.year, today.month, today.day)
-        if not today_events:
-            return 0
 
         # 计算 fire_at：今日 reminder_time，若已过则立即入队（调度器会立刻触发）
         time_str = reminder_cfg.get("reminder_time", "09:00") or "09:00"
@@ -404,26 +480,17 @@ class CalendarPlusPlugin(Star):
             hh, mm = time_str.split(":")
             fire_at = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
         except (ValueError, AttributeError):
-            logger.warning(f"{_PREFIX} ⚠️ reminder_time 格式错误: {time_str}，回退 09:00")
+            logger.warning(f"{tag()} ⚠️ reminder_time 格式错误: {time_str}，回退 09:00")
             fire_at = now.replace(hour=9, minute=0, second=0, microsecond=0)
 
         enqueued = 0
         for session in targets:
-            for event in today_events:
-                event_id = str(event.get("id", ""))
-                if self.scheduler.has_calendar_task_for_session_today(
-                    session, event_id, today
-                ):
-                    continue
-                self.scheduler.add_calendar_task(
-                    session=session,
-                    fire_at=fire_at,
-                    event_id=event_id,
-                    event_text=str(event.get("text", "")),
-                )
-                enqueued += 1
+            if self.scheduler.has_calendar_task_for_session_today(session, today):
+                continue
+            self.scheduler.add_calendar_task(session=session, fire_at=fire_at)
+            enqueued += 1
         if enqueued > 0:
-            logger.info(f"{_PREFIX} 📅 今日事项扫描入队 {enqueued} 条")
+            logger.info(f"{tag()} 📅 今日提醒入队 {enqueued} 条 session")
         return enqueued
 
     # ==================== AstrBot 全局配置 ====================
@@ -482,6 +549,8 @@ class CalendarPlusPlugin(Star):
             result.append(CATEGORY_POLITICAL)
         if be.get("international", False):
             result.append(CATEGORY_INTERNATIONAL)
+        if be.get("almanac", False):
+            result.append(CATEGORY_ALMANAC)
         return result
 
     def _resolve_placeholders(self, text: str) -> str:
@@ -509,7 +578,7 @@ class CalendarPlusPlugin(Star):
         try:
             from astrbot.core.agent.message import TextPart
         except ImportError:
-            logger.warning(f"{_PREFIX} ⚠️ 无法导入 TextPart，跳过附带信息注入")
+            logger.warning(f"{tag()} ⚠️ 无法导入 TextPart，跳过附带信息注入")
             return
         part = TextPart(text=text)
         mark_as_temp = getattr(part, "mark_as_temp", None)
@@ -529,7 +598,7 @@ class CalendarPlusPlugin(Star):
                 sleep_prompt = self._resolve_placeholders(sleep_prompt)
                 self._append_dynamic_content(req, sleep_prompt)
         except Exception as e:
-            logger.error(f"{_PREFIX} ❌ on_llm_request 注入失败: {e}")
+            logger.error(f"{tag(event)} ❌ on_llm_request 注入失败: {e}")
 
     # ==================== 命令树 ====================
 
@@ -544,12 +613,12 @@ class CalendarPlusPlugin(Star):
             "[time_awareness 命令]\n"
             "/calendar show [YYYY-MM]  — 列出指定月份（默认本月）的事项\n"
             "/calendar add <日期> [重复] <标题>  — 新增事项（管理员）\n"
-            "/calendar del <id 或 文本>  — 删除事项（管理员；内置事件删除后会被加入黑名单不再生成）\n"
+            "/calendar del <id>  — 删除用户事项（管理员；内置事件不允许删除，请用配置开关）\n"
             "/calendar create  — 按配置里的世界观重新生成完整日历（管理员）\n"
             "/calendar export  — 输出当前数据为 YAML（管理员）\n"
             "/calendar import  — 回复一条 YAML 文本批量导入（管理员）\n"
             "/calendar builtin_regen  — 重新生成当年内置现实事件（管理员）\n"
-            "/calendar builtin_list [分类]  — 列出当年所有内置事件（可按「法定/传统/节气/政治/国际」过滤）\n"
+            "/calendar builtin_list [分类]  — 列出当年所有内置事件（可按「法定/传统/节气/政治/国际/黄历」过滤）\n"
             "/calendar help  — 显示本帮助\n"
             "\n"
             "日期格式：\n"
@@ -564,12 +633,12 @@ class CalendarPlusPlugin(Star):
             "示例：\n"
             "/calendar add 2026-06-24 测试事件\n"
             "/calendar add 06-24 9 每年生日\n"
-            "/calendar del 元旦  — 按文本删除内置事件\n"
+            "/calendar del abc12345  — 按 id 删除用户事件\n"
             "\n"
-            "内置现实日历事件（默认开法定/传统/节气，关政治/国际）：\n"
+            "内置现实日历事件（默认开法定/传统/节气，关政治/国际/黄历）：\n"
             "- 法定节假日（含调休）、传统农历节日、二十四节气\n"
-            "- 政治纪念日、国际/西方节日\n"
-            "- 跨年自动重新生成；/calendar del 删除的项会被加入黑名单\n"
+            "- 政治纪念日、国际/西方节日、黄历（每日干支/宜忌）\n"
+            "- 跨年自动重新生成\n"
             "\n"
             "主动提醒（reminder 配置启用后）：\n"
             "- 当日事项会在配置的时刻主动发到白名单会话\n"
@@ -846,6 +915,7 @@ class CalendarPlusPlugin(Star):
         /calendar builtin_list 节气      — 仅列出二十四节气
         /calendar builtin_list 政治      — 仅列出政治纪念日
         /calendar builtin_list 国际      — 仅列出国际/西方节日
+        /calendar builtin_list 黄历      — 仅列出每日黄历
         """
         now = get_now(self.config, self._astrbot_config())
         builtin_data = self.builtin_manager.load_raw()
@@ -886,6 +956,7 @@ class CalendarPlusPlugin(Star):
             "政治": CATEGORY_POLITICAL, "政治纪念": CATEGORY_POLITICAL, "political": CATEGORY_POLITICAL,
             "国际": CATEGORY_INTERNATIONAL, "international": CATEGORY_INTERNATIONAL,
             "西方": CATEGORY_INTERNATIONAL,
+            "黄历": CATEGORY_ALMANAC, "老黄历": CATEGORY_ALMANAC, "almanac": CATEGORY_ALMANAC,
         }
         return mapping.get(text.lower(), "")
 
@@ -899,13 +970,12 @@ class CalendarPlusPlugin(Star):
         hint: str = "",
     ) -> str:
         """
-        当你对用户承诺「X 分钟后再说/再做某事」时调用此工具，到点会自动主动发消息给当前会话。
-        到点时插件会自动调用你（带人设/历史/睡眠状态等完整上下文），由你生成符合人设的回复。
-        仅当前会话在管理员提醒白名单内时才会真正入队，否则返回失败。
+        当你对当前对话承诺「X 分钟后再继续/再说某事」时调用此工具。
+        到点时插件会带完整人设/历史/状态重新唤醒你，由你生成符合人设的回复。
 
         Args:
             delay_minutes(int): 几分钟后触发（范围 1-1440，即最多 24 小时）
-            hint(string): 可选。备忘录——到点时你会看到这条提示，提醒自己当时承诺了什么。建议简短（如"准备好了，出发"）
+            hint(string): 可选备忘——到点时你会看到这条文本，提醒当时承诺了什么
         """
         reminder_cfg = self.config.get("reminder", {})
         if not reminder_cfg.get("enable_reminder", False):
@@ -928,10 +998,13 @@ class CalendarPlusPlugin(Star):
 
         now = get_now(self.config, self._astrbot_config())
         fire_at = now + datetime.timedelta(minutes=delay)
+        # at 目标固定为当前对话的发起人（群聊场景前置 At 组件）
+        target_uid = event.get_sender_id() or ""
         self.scheduler.add_followup_task(
             session=session,
             fire_at=fire_at,
             hint=(hint or "").strip(),
+            target_user_id=target_uid,
         )
         hint_preview = f"（备忘：{(hint or '').strip()[:30]}）" if (hint or "").strip() else ""
         return f"已安排 {delay} 分钟后（{fire_at.strftime('%H:%M')}）主动发消息{hint_preview}"
@@ -955,6 +1028,7 @@ class CalendarPlusPlugin(Star):
             CATEGORY_SOLAR_TERM: "节气",
             CATEGORY_POLITICAL: "政治",
             CATEGORY_INTERNATIONAL: "国际",
+            CATEGORY_ALMANAC: "黄历",
         }.get(category, "内")
 
     def _find_event_by_short_id(self, short: str) -> dict | None:
@@ -1013,8 +1087,19 @@ class CalendarPlusPlugin(Star):
         return None
 
 
-def _build_text_chain(text: str):
-    """构造只含一条文本的 MessageChain，用于 context.send_message。"""
-    from astrbot.api.event import MessageChain
+def _build_chain(text: str, at_uid: str = ""):
+    """构造 MessageChain，用于 context.send_message。
 
-    return MessageChain().message(text)
+    ``at_uid`` 非空时前置 At 组件（仅群聊 followup 场景）。
+    渲染规则参照 attool：At 后跟零宽空格 + 空格，避免与后续文本粘连；
+    不在系统里调 attool 插件——主动消息走 ``context.send_message`` 不经 hook 链。
+    """
+    from astrbot.api.event import MessageChain
+    from astrbot.core.message.components import At, Plain
+
+    chain = MessageChain()
+    if at_uid:
+        chain.chain = [At(qq=at_uid), Plain("​ ​" + text)]
+    else:
+        chain.chain = [Plain(text)]
+    return chain

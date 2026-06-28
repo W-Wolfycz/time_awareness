@@ -6,11 +6,10 @@
 
 import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from astrbot.api import logger
+from ..log import logger, tag
 
 from ..constants import DEFAULT_SLEEP_PROMPT, LEGACY_DEFAULT_SLEEP_PROMPT
 
-_PREFIX = "[time_awareness]"
 
 
 def _get_astrbot_timezone(astrbot_config) -> str:
@@ -23,7 +22,7 @@ def _get_astrbot_timezone(astrbot_config) -> str:
         if hasattr(astrbot_config, "timezone"):
             return astrbot_config.timezone or ""
     except Exception as e:
-        logger.debug(f"{_PREFIX} 读取 AstrBot 时区失败: {e}")
+        logger.debug(f"{tag()} 读取 AstrBot 时区失败: {e}")
     return ""
 
 
@@ -42,11 +41,11 @@ def get_tz(config: dict, astrbot_config=None):
                 return ZoneInfo(tz_str)
             except (ZoneInfoNotFoundError, KeyError) as e:
                 logger.warning(
-                    f"{_PREFIX} ⚠️ AstrBot 时区配置无效 '{tz_str}': {e}，回退到插件时区配置"
+                    f"{tag()} ⚠️ AstrBot 时区配置无效 '{tz_str}': {e}，回退到插件时区配置"
                 )
         elif use_astrbot:
             logger.debug(
-                f"{_PREFIX} 已启用「跟随 AstrBot 时区」但 AstrBot 未配置时区，回退到插件时区配置"
+                f"{tag()} 已启用「跟随 AstrBot 时区」但 AstrBot 未配置时区，回退到插件时区配置"
             )
 
     tz_str = time_awareness_config.get("timezone", "")
@@ -55,7 +54,7 @@ def get_tz(config: dict, astrbot_config=None):
     try:
         return ZoneInfo(tz_str)
     except (ZoneInfoNotFoundError, KeyError) as e:
-        logger.warning(f"{_PREFIX} ⚠️ 无效的时区配置 '{tz_str}': {e}，回退到系统本地时区")
+        logger.warning(f"{tag()} ⚠️ 无效的时区配置 '{tz_str}': {e}，回退到系统本地时区")
         return None
 
 
@@ -86,7 +85,7 @@ def is_in_time_range(time_range: str, tz=None) -> bool:
         else:
             return start_minutes <= current_minutes <= end_minutes
     except Exception as e:
-        logger.warning(f"{_PREFIX} ⚠️ 时间范围解析错误: {e}")
+        logger.warning(f"{tag()} ⚠️ 时间范围解析错误: {e}")
         return False
 
 

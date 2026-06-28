@@ -26,9 +26,8 @@
 - ``REPEAT_FOREVER``（-1）：每年重复（永久），忽略年份，仅按月-日匹配。
 """
 
-from astrbot.api import logger
+from ..log import logger, tag
 
-_PREFIX = "[time_awareness]"
 
 REPEAT_NONE = 0
 REPEAT_FOREVER = -1
@@ -92,7 +91,7 @@ class CalendarStore:
         self._initialized = True
         self.events: list = []  # 用户自定义事件（calendar_data.yaml）
         self.builtin_events: list = []  # 内置现实日历事件（builtin_events.yaml）
-        logger.debug(f"{_PREFIX} CalendarStore 初始化完成")
+        logger.debug(f"{tag()} CalendarStore 初始化完成")
 
     def set_events(self, events: list) -> None:
         """整体替换用户事项列表（调用方应已完成校验/规整）。"""

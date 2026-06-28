@@ -1,13 +1,14 @@
 """
 内置现实日历事件生成器
 
-按 5 个分类生成常用的现实日历事件：
+按 6 个分类生成常用的现实日历事件：
 
 - ``legal_holiday``：法定节假日（含调休），数据源 ``chinese_calendar`` 库
 - ``traditional``：传统农历节日（元宵、七夕、重阳、腊八、除夕等）
 - ``political``：政治纪念日（建党、建军、抗战胜利等，固定公历）
 - ``international``：国际/西方节日（情人节、圣诞节、母亲节、复活节等）
 - ``solar_term``：二十四节气
+- ``almanac``：黄历（每日干支/冲煞/宜忌，一年 365/366 条）
 
 设计要点：
 
@@ -18,14 +19,15 @@
   ``holiday_name``（连休场景下「先休后过节」也能正确归属）。
 - **节气跨年问题**：``Lunar.getJieQiTable`` 返回的表可能跨公历年（农历年跨公历），
   本模块改用 ``Solar.getLunar().getJieQi()`` 逐日判定，只取当年节气。
+- **黄历的量级**：与其他「特定日期事件」分类不同，黄历每日一条（365+ 条/年），
+  默认关闭，按需启用；text 截断宜/忌前 4 项避免过长。
 """
 
 import datetime
 from typing import Optional
 
-from astrbot.api import logger
+from ..log import logger, tag
 
-_PREFIX = "[time_awareness]"
 
 
 # ==================== 类目常量 ====================
@@ -35,6 +37,7 @@ CATEGORY_TRADITIONAL = "traditional"
 CATEGORY_POLITICAL = "political"
 CATEGORY_INTERNATIONAL = "international"
 CATEGORY_SOLAR_TERM = "solar_term"
+CATEGORY_ALMANAC = "almanac"
 
 ALL_CATEGORIES = (
     CATEGORY_LEGAL,
@@ -42,6 +45,7 @@ ALL_CATEGORIES = (
     CATEGORY_POLITICAL,
     CATEGORY_INTERNATIONAL,
     CATEGORY_SOLAR_TERM,
+    CATEGORY_ALMANAC,
 )
 
 
@@ -133,15 +137,19 @@ def _make_event(year: int, month: int, day: int, text: str, category: str) -> di
     }
 
 
-def _lunar_to_solar(year: int, lunar_month: int, lunar_day: int) -> Optional[datetime.date]:
-    """农历转公历（非闰月）。失败返回 None。"""
+def _lunar_to_solar(year: int, lunar_month: int, lunar_day: int, *, silent: bool = False) -> Optional[datetime.date]:
+    """农历转公历（非闰月）。失败返回 None。
+
+    silent=True 用于「探索性调用」（如除夕先试 30 再试 29），失败是预期路径，不打 warning。
+    """
     try:
         from lunar_python import Lunar
         lunar = Lunar.fromYmd(year, lunar_month, lunar_day)
         solar = lunar.getSolar()
         return datetime.date(solar.getYear(), solar.getMonth(), solar.getDay())
     except Exception as e:
-        logger.warning(f"{_PREFIX} ⚠️ 农历 {year}/{lunar_month}/{lunar_day} 转公历失败: {e}")
+        if not silent:
+            logger.warning(f"{tag()} ⚠️ 农历 {year}/{lunar_month}/{lunar_day} 转公历失败: {e}")
         return None
 
 
@@ -200,7 +208,7 @@ def gen_legal_holidays(year: int) -> list:
     try:
         import chinese_calendar as cc
     except ImportError:
-        logger.warning(f"{_PREFIX} ⚠️ chinese_calendar 库未安装，跳过法定节假日生成")
+        logger.warning(f"{tag()} ⚠️ chinese_calendar 库未安装，跳过法定节假日生成")
         return []
 
     # 计算各节日正日子
@@ -229,7 +237,7 @@ def gen_legal_holidays(year: int) -> list:
             is_hol, name = cc.get_holiday_detail(d)
         except NotImplementedError:
             # chinese_calendar 未覆盖该年份
-            logger.warning(f"{_PREFIX} ⚠️ chinese_calendar 未覆盖 {year} 年，跳过法定节假日")
+            logger.warning(f"{tag()} ⚠️ chinese_calendar 未覆盖 {year} 年，跳过法定节假日")
             return []
         except Exception:
             is_hol, name = False, None
@@ -263,9 +271,10 @@ def gen_traditional(year: int) -> list:
                 break
 
     # 除夕：腊月最后一天（29 或 30），同样尝试两个农历年份
+    # 30 是大月尝试、29 是小月兜底——都是预期路径，用 silent 避免误报 warning
     for lunar_year in (year, year - 1):
         for last_day in (30, 29):
-            solar = _lunar_to_solar(lunar_year, 12, last_day)
+            solar = _lunar_to_solar(lunar_year, 12, last_day, silent=True)
             if solar is not None and solar.year == year:
                 events.append(_make_event(year, solar.month, solar.day, "除夕", CATEGORY_TRADITIONAL))
                 break
@@ -296,7 +305,7 @@ def gen_international(year: int) -> list:
         easter = _gauss_easter(year)
         events.append(_make_event(year, easter.month, easter.day, "复活节", CATEGORY_INTERNATIONAL))
     except Exception as e:
-        logger.warning(f"{_PREFIX} ⚠️ 复活节计算失败 {year}: {e}")
+        logger.warning(f"{tag()} ⚠️ 复活节计算失败 {year}: {e}")
     return events
 
 
@@ -309,7 +318,7 @@ def gen_solar_terms(year: int) -> list:
     try:
         from lunar_python import Solar
     except ImportError:
-        logger.warning(f"{_PREFIX} ⚠️ lunar_python 库未安装，跳过节气生成")
+        logger.warning(f"{tag()} ⚠️ lunar_python 库未安装，跳过节气生成")
         return []
 
     target = set(SOLAR_TERMS)
@@ -322,6 +331,42 @@ def gen_solar_terms(year: int) -> list:
         jq = lunar.getJieQi()
         if jq and jq in target:
             events.append(_make_event(year, d.month, d.day, jq, CATEGORY_SOLAR_TERM))
+        d += datetime.timedelta(days=1)
+    return events
+
+
+def gen_almanac(year: int) -> list:
+    """生成黄历每日事件（一年 365/366 条）。
+
+    每日一条，包含干支日、冲煞（生肖+方位）、宜、忌。信息量较大但每日才
+    一条，注入 ``{calendar_today}`` 时可控（约 40 字/天）。
+
+    - ``getDayInGanZhi()`` → 干支日（如 "辛未"）
+    - ``getDayChongShengXiao()`` → 冲的生肖（"牛" 比 "丑" 直观）
+    - ``getDaySha()`` → 煞方（"西"）
+    - ``getDayYi()`` / ``getDayJi()`` → 宜 / 忌列表（取前 4 项截断，避免 text 过长）
+    """
+    try:
+        from lunar_python import Solar
+    except ImportError:
+        logger.warning(f"{tag()} ⚠️ lunar_python 库未安装，跳过黄历生成")
+        return []
+
+    events = []
+    d = datetime.date(year, 1, 1)
+    end = datetime.date(year, 12, 31)
+    while d <= end:
+        solar = Solar.fromYmd(d.year, d.month, d.day)
+        lunar = solar.getLunar()
+        gz = lunar.getDayInGanZhi()
+        chong = lunar.getDayChongShengXiao()
+        sha = lunar.getDaySha()
+        yi = lunar.getDayYi()
+        ji = lunar.getDayJi()
+        yi_text = "、".join(yi[:4]) if yi else "无"
+        ji_text = "、".join(ji[:4]) if ji else "无"
+        text = f"黄历 {gz}日 冲{chong}煞{sha} 宜:{yi_text} 忌:{ji_text}"
+        events.append(_make_event(year, d.month, d.day, text, CATEGORY_ALMANAC))
         d += datetime.timedelta(days=1)
     return events
 
@@ -352,6 +397,7 @@ _GENERATORS = {
     CATEGORY_POLITICAL: gen_political,
     CATEGORY_INTERNATIONAL: gen_international,
     CATEGORY_SOLAR_TERM: gen_solar_terms,
+    CATEGORY_ALMANAC: gen_almanac,
 }
 
 
@@ -373,17 +419,18 @@ def generate_for_year(year: int, enabled_categories: list) -> list:
         try:
             events = gen(year)
             all_events.extend(events)
-            logger.debug(f"{_PREFIX} 内置[{cat}] 生成 {len(events)} 条")
+            logger.debug(f"{tag()} 内置[{cat}] 生成 {len(events)} 条")
         except Exception as e:
-            logger.error(f"{_PREFIX} ❌ 内置[{cat}] 生成失败: {e}")
+            logger.error(f"{tag()} ❌ 内置[{cat}] 生成失败: {e}")
 
-    # 排序：月、日、分类优先级（法定 > 传统 > 节气 > 政治 > 国际）
+    # 排序：月、日、分类优先级（法定 > 传统 > 节气 > 政治 > 国际 > 黄历）
     priority = {
         CATEGORY_LEGAL: 0,
         CATEGORY_TRADITIONAL: 1,
         CATEGORY_SOLAR_TERM: 2,
         CATEGORY_POLITICAL: 3,
         CATEGORY_INTERNATIONAL: 4,
+        CATEGORY_ALMANAC: 5,
     }
     all_events.sort(key=lambda e: (e["month"], e["day"], priority.get(e["category"], 9), e["text"]))
 

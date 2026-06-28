@@ -18,9 +18,8 @@ import json
 import os
 
 import yaml
-from astrbot.api import logger
+from ..log import logger, tag
 
-_PREFIX = "[time_awareness]"
 
 try:  # pragma: no cover - 取决于运行环境是否带 libyaml
     from yaml import CSafeLoader as _SafeLoader
@@ -70,19 +69,19 @@ def load_mapping(path: str):
                 data = yaml.load(f, Loader=_SafeLoader)
             break
         except PermissionError:
-            logger.error(f"{_PREFIX} ❌ 文件读取权限不足: {path}")
+            logger.error(f"{tag()} ❌ 文件读取权限不足: {path}")
             return None
         except UnicodeDecodeError:
             continue
         except yaml.YAMLError:
-            logger.error(f"{_PREFIX} ❌ YAML 解析失败，文件可能已损坏: {path}")
+            logger.error(f"{tag()} ❌ YAML 解析失败，文件可能已损坏: {path}")
             return None
     else:
-        logger.error(f"{_PREFIX} ❌ 无法以任何编码读取文件: {path}")
+        logger.error(f"{tag()} ❌ 无法以任何编码读取文件: {path}")
         return None
 
     if not isinstance(data, dict):
-        logger.error(f"{_PREFIX} ❌ 文件格式错误：根对象不是字典: {path}")
+        logger.error(f"{tag()} ❌ 文件格式错误：根对象不是字典: {path}")
         return None
     return data
 
@@ -99,7 +98,7 @@ def atomic_write_yaml(path: str, data: dict, header: str | None = None) -> bool:
         os.rename(temp_file, path)
         return True
     except Exception as e:
-        logger.error(f"{_PREFIX} ❌ 写入文件失败: {path}: {e}")
+        logger.error(f"{tag()} ❌ 写入文件失败: {path}: {e}")
         return False
     finally:
         if os.path.exists(temp_file):
@@ -117,14 +116,14 @@ def _load_json_mapping(path: str):
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
-            logger.error(f"{_PREFIX} ❌ 旧 JSON 根对象不是字典: {path}")
+            logger.error(f"{tag()} ❌ 旧 JSON 根对象不是字典: {path}")
             return None
         except PermissionError:
-            logger.error(f"{_PREFIX} ❌ 旧 JSON 读取权限不足: {path}")
+            logger.error(f"{tag()} ❌ 旧 JSON 读取权限不足: {path}")
             return None
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
-    logger.error(f"{_PREFIX} ❌ 无法读取旧 JSON 文件: {path}")
+    logger.error(f"{tag()} ❌ 无法读取旧 JSON 文件: {path}")
     return None
 
 
@@ -142,7 +141,7 @@ def migrate_json_to_yaml(json_path: str, yaml_path: str):
         return None
 
     if not atomic_write_yaml(yaml_path, data):
-        logger.error(f"{_PREFIX} ❌ JSON→YAML 迁移写入失败: {json_path} -> {yaml_path}")
+        logger.error(f"{tag()} ❌ JSON→YAML 迁移写入失败: {json_path} -> {yaml_path}")
         return None
 
     try:
@@ -151,10 +150,10 @@ def migrate_json_to_yaml(json_path: str, yaml_path: str):
             os.remove(backup_path)
         os.rename(json_path, backup_path)
         logger.info(
-            f"{_PREFIX} ✅ 已迁移 {os.path.basename(json_path)} → "
+            f"{tag()} ✅ 已迁移 {os.path.basename(json_path)} → "
             f"{os.path.basename(yaml_path)}（旧文件备份为 .bak）"
         )
     except OSError as e:
-        logger.warning(f"{_PREFIX} ⚠️ 旧 JSON 备份失败（数据已迁移）: {e}")
+        logger.warning(f"{tag()} ⚠️ 旧 JSON 备份失败（数据已迁移）: {e}")
 
     return data

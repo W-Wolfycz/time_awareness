@@ -13,11 +13,10 @@ import json
 import re
 from typing import Optional
 
-from astrbot.api import logger
+from ..log import logger, tag
 
 from ..constants import DEFAULT_AI_GENERATE_SYSTEM_PROMPT
 
-_PREFIX = "[time_awareness]"
 
 DEFAULT_MAX_GENERATE = 40
 _MAX_EVENT_TEXT_LENGTH = 200
@@ -80,21 +79,21 @@ def parse_generated_events(response_text: str) -> Optional[list]:
         match = re.search(r"\[.*\]", text, re.DOTALL)
         if not match:
             logger.warning(
-                f"{_PREFIX} ⚠️ AI 生成时间表响应中未找到 JSON 数组: {text[:200]}"
+                f"{tag()} ⚠️ AI 生成时间表响应中未找到 JSON 数组: {text[:200]}"
             )
             return None
         try:
             data = json.loads(match.group())
         except json.JSONDecodeError as e:
             logger.warning(
-                f"{_PREFIX} ⚠️ AI 生成时间表 JSON 解析失败: {e}, 原文: {text[:200]}"
+                f"{tag()} ⚠️ AI 生成时间表 JSON 解析失败: {e}, 原文: {text[:200]}"
             )
             return None
 
     if isinstance(data, dict):
         data = data.get("events")
     if not isinstance(data, list):
-        logger.warning(f"{_PREFIX} ⚠️ AI 生成时间表结果不是数组")
+        logger.warning(f"{tag()} ⚠️ AI 生成时间表结果不是数组")
         return None
 
     events = []
@@ -129,7 +128,7 @@ async def generate_calendar_events(
     """发起 LLM 调用，根据主题提示词生成时间表事项。"""
     user_prompt = (user_prompt or "").strip()
     if not user_prompt:
-        logger.warning(f"{_PREFIX} ⚠️ AI 生成时间表缺少主题提示词")
+        logger.warning(f"{tag()} ⚠️ AI 生成时间表缺少主题提示词")
         return None
 
     try:
@@ -139,29 +138,29 @@ async def generate_calendar_events(
             system_prompt=system_prompt,
         )
     except Exception as e:
-        logger.error(f"{_PREFIX} ❌ AI 生成时间表 LLM 调用失败: {e}")
+        logger.error(f"{tag()} ❌ AI 生成时间表 LLM 调用失败: {e}")
         return None
 
     if not llm_response or llm_response.role != "assistant":
-        logger.warning(f"{_PREFIX} ⚠️ AI 生成时间表 LLM 响应异常: {llm_response}")
+        logger.warning(f"{tag()} ⚠️ AI 生成时间表 LLM 响应异常: {llm_response}")
         return None
 
     response_text = llm_response.completion_text
     if not response_text:
-        logger.warning(f"{_PREFIX} ⚠️ AI 生成时间表 LLM 返回空响应")
+        logger.warning(f"{tag()} ⚠️ AI 生成时间表 LLM 返回空响应")
         return None
 
-    logger.debug(f"{_PREFIX} AI 生成时间表原始响应: {response_text[:500]}")
+    logger.debug(f"{tag()} AI 生成时间表原始响应: {response_text[:500]}")
 
     events = parse_generated_events(response_text)
     if events is None:
         return None
 
     if len(events) > max_events:
-        logger.warning(f"{_PREFIX} ⚠️ AI 生成时间表超过上限 {max_events}，已截断")
+        logger.warning(f"{tag()} ⚠️ AI 生成时间表超过上限 {max_events}，已截断")
         events = events[:max_events]
     for event in events:
         event.setdefault("year", current_year)
 
-    logger.info(f"{_PREFIX} ✅ AI 生成时间表成功，共 {len(events)} 条事项")
+    logger.info(f"{tag()} ✅ AI 生成时间表成功，共 {len(events)} 条事项")
     return events

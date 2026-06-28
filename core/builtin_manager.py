@@ -33,12 +33,11 @@
 import datetime
 import os
 
-from astrbot.api import logger
+from ..log import logger, tag
 
 from ._datafile import atomic_write_yaml, load_mapping
 from .builtin_events import generate_for_year
 
-_PREFIX = "[time_awareness]"
 
 BUILTIN_FILE_NAME = "builtin_events.yaml"
 BUILTIN_DATA_VERSION = 1
@@ -94,7 +93,7 @@ class BuiltinManager:
             header="time_awareness 内置日历事件（自动生成，可手动编辑）",
         )
         if not ok:
-            logger.error(f"{_PREFIX} ❌ 内置事件保存失败")
+            logger.error(f"{tag()} ❌ 内置事件保存失败")
         return ok
 
     # ==================== 业务方法 ====================
@@ -119,7 +118,7 @@ class BuiltinManager:
         if not ok:
             return -1
         logger.info(
-            f"{_PREFIX} ✅ 内置事件已重新生成: year={year} "
+            f"{tag()} ✅ 内置事件已重新生成: year={year} "
             f"categories={categories} events={len(events)}"
         )
         return len(events)

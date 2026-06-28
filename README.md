@@ -8,8 +8,9 @@
 - **睡眠模式**：检测到处于睡眠窗口（支持跨午夜）时，把睡眠提示动态注入本轮用户消息后
 - **日历占位符**：在时间引导 prompt / 睡眠提示中写 `{calendar_today}` 即可在请求时替换为当日事项
 - **用户日历**：YAML 持久化 + 重复规则（仅当年 / 连续 N 年 / 永久每年） + AI 一次性生成完整月历
-- **现实日历事件**：法定节假日（含调休）/ 传统农历节日 / 二十四节气 / 政治纪念日 / 国际西方节日
-- **主动提醒**：当日事项在指定时刻主动发到白名单会话；LLM 可通过 `schedule_followup` 工具自行安排后续主动消息
+- **现实日历事件**：法定节假日（含调休）/ 传统农历节日 / 二十四节气 / 政治纪念日 / 国际西方节日 / 黄历（每日干支/宜忌）
+- **主动提醒**：当日事项在指定时刻主动发到白名单会话；LLM 可通过 `schedule_followup` 工具自行安排后续主动消息；回复按段发送（段间 0.5-2s 随机延迟模拟打字节奏），群聊 followup 自动 @ 发起人
+- **Plugin Pages WebUI**：AstrBot 主 webui 侧边栏点开即用，含概览统计 / 日历月视图（builtin+custom 同屏）/ pending 任务列表（可取消）
 - **聊天命令**：`/calendar show|add|del|create|export|import|help` + `builtin_list|builtin_regen`
 
 ## 安装
@@ -18,7 +19,7 @@
 
 ## 配置
 
-三组配置项，均通过 AstrBot 配置页编辑：
+四组配置项，均通过 AstrBot 配置页编辑：
 
 ### `time_awareness`（时间感知）
 
@@ -54,6 +55,7 @@
 | `solar_terms` | 二十四节气 | true |
 | `political` | 政治纪念日 | false |
 | `international` | 国际/西方节日 | false |
+| `almanac` | 黄历（每日干支/冲煞/宜忌，一年约 365 条） | false |
 
 ### `reminder`（主动提醒）
 
@@ -67,6 +69,14 @@
 | `followup_tool_enabled` | 向 LLM 注册 `schedule_followup` 工具 | true |
 | `include_history` | 主动提醒携带对话历史（从 chat_memory 插件拉取） | true |
 | `history_rounds` | 对话历史轮数（1-50，每轮 = user + assistant） | 10 |
+| `reminder_provider_id` | 主动提醒使用的模型（留空跟随主模型） | "" |
+
+### `log`（日志）
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `debug_to_info` | 调试日志提级：把本插件 debug 日志改走 info 通道输出 | false |
+| `log_with_bot_id` | 日志区分机器人实例：能拿到事件的日志前缀变为 `[time_awareness:platform_id]` | false |
 
 ## 命令
 
@@ -89,15 +99,26 @@
 - `1-4` = 从基准年起连续 N+1 年
 - `9` = 永久每年重复
 
-**内置事件分类过滤**（`builtin_list` 参数）：`法定` / `传统` / `节气` / `政治` / `国际`
+**内置事件分类过滤**（`builtin_list` 参数）：`法定` / `传统` / `节气` / `政治` / `国际` / `黄历`
 
 **内置事件单条删除**：不允许——regen 会复活。如需关闭整类请用配置开关；如需批量定制请直接编辑 `builtin_events.yaml`。
+
+## WebUI
+
+在 AstrBot 主 webui 左侧「插件管理」找到 time_awareness，点「插件页」按钮进入。三个视图：
+
+- **概览**：事件总数、本月事件数、待触发任务、近 7 天任务、下个任务相对时间、日历/主动提醒启用状态等指标卡
+- **日历**：月视图 7×6 grid，内置事件（灰）与自定义事件（蓝）同屏颜色区分；前后翻月 + 「今」回当月；超长事件（如黄历）被截断时 hover 立即显示完整内容
+- **任务**：pending 任务列表按触发时间升序，可取消（带二次确认）
+
+配置修改仍走 AstrBot 主 webui 的「插件配置」页，WebUI 暂为只读视图。
 
 ## 文件结构
 
 ```
 time_awareness/
 ├── main.py                   # Star 类 + on_llm_request 钩子 + 命令树 + 主动提醒
+├── web_api.py                # Plugin Pages 后端 API（6 端点）
 ├── _conf_schema.json         # 三组配置
 ├── metadata.yaml
 ├── requirements.txt
@@ -109,7 +130,11 @@ time_awareness/
 │   ├── calendar_manager.py   # 用户事件 CRUD + 导入导出
 │   ├── builtin_events.py     # 5 类现实事件生成器
 │   ├── builtin_manager.py    # 内置事件文件管理 + 跨年 regen
-│   └── scheduler.py          # 提醒调度循环
+│   └── scheduler.py          # 提醒调度循环（含 cancel_task / list_pending_detailed）
+├── pages/webui/              # 前端三件套（vanilla JS，无框架）
+│   ├── index.html
+│   ├── app.js
+│   └── style.css
 └── llm/
     └── calendar_generator.py # AI 生成日历
 ```

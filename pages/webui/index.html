@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>time_awareness · 时间感知与智能日历</title>
+  <link rel="stylesheet" href="style.css">
+  <script>
+    // 防止浅色主题闪烁（FOUC）：AstrBot 主 webui 注入 localStorage 主题
+    (function () {
+      try {
+        var t = localStorage.getItem('astrbot-theme') || 'light';
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    })();
+  </script>
+</head>
+<body>
+  <div class="app">
+    <!-- 侧边栏 -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">🕐 时间感知</div>
+        <div class="sidebar-subtitle">智能日历与主动提醒</div>
+      </div>
+      <nav class="sidebar-nav">
+        <button class="nav-item active" data-view="dashboard">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+          概览
+        </button>
+        <button class="nav-item" data-view="calendar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          日历
+        </button>
+        <button class="nav-item" data-view="tasks">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          任务
+        </button>
+      </nav>
+      <div class="sidebar-footer">
+        <div>v<span id="version-tag">1.0.0</span></div>
+        <div id="plugin-name-tag" style="opacity: 0.7; margin-top: 2px;">time_awareness</div>
+      </div>
+    </aside>
+
+    <!-- 主内容区 -->
+    <div class="app-main">
+      <header class="topbar">
+        <div class="topbar-title" id="view-title">概览</div>
+        <div class="topbar-actions">
+          <button class="btn btn-ghost btn-sm" id="theme-toggle" title="切换主题">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          </button>
+          <button class="btn btn-ghost btn-sm" id="refresh-btn" title="刷新">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="content">
+        <!-- ===== 概览 ===== -->
+        <section class="view active" data-view="dashboard">
+          <div id="dashboard-content">
+            <div class="loading-wrap"><span class="spinner"></span> 加载中...</div>
+          </div>
+        </section>
+
+        <!-- ===== 日历 ===== -->
+        <section class="view" data-view="calendar">
+          <div class="calendar-toolbar">
+            <div class="calendar-nav">
+              <button class="btn btn-sm" id="cal-prev">‹</button>
+              <div class="calendar-title" id="cal-title">—</div>
+              <button class="btn btn-sm" id="cal-next">›</button>
+              <button class="btn btn-sm" id="cal-today">今</button>
+            </div>
+            <div class="calendar-legend">
+              <span class="legend-item"><span class="legend-dot builtin"></span>内置事件</span>
+              <span class="legend-item"><span class="legend-dot custom"></span>自定义事件</span>
+            </div>
+          </div>
+          <div class="calendar-grid" id="calendar-grid">
+            <div class="loading-wrap"><span class="spinner"></span> 加载中...</div>
+          </div>
+        </section>
+
+        <!-- ===== 任务 ===== -->
+        <section class="view" data-view="tasks">
+          <div id="tasks-content">
+            <div class="loading-wrap"><span class="spinner"></span> 加载中...</div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- 取消任务确认 modal -->
+  <div class="modal-overlay" id="confirm-modal">
+    <div class="modal">
+      <div class="modal-title" id="confirm-title">确认操作</div>
+      <div class="modal-body" id="confirm-body">确定要执行此操作吗？</div>
+      <div class="modal-actions">
+        <button class="btn" id="confirm-cancel">取消</button>
+        <button class="btn btn-danger" id="confirm-ok">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 单日事件 modal -->
+  <div class="modal-overlay" id="day-modal">
+    <div class="modal">
+      <div class="modal-title" id="day-modal-title">—</div>
+      <div class="modal-body" id="day-modal-body"></div>
+      <div class="modal-actions">
+        <button class="btn" id="day-modal-close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- toast 容器 -->
+  <div class="toast-wrap" id="toast-wrap"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
