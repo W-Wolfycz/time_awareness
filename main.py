@@ -219,6 +219,12 @@ class CalendarPlusPlugin(Star):
 
     async def _on_due(self, group: DueGroup) -> None:
         """到期任务组的触发回调：合并所有任务，调一次 LLM 生成回复并发出。"""
+        task_summary = ",".join(f"{t.kind}:{t.id[:8]}" for t in group.tasks)
+        late_info = f" late={group.late_minutes}min" if group.is_late else ""
+        logger.info(
+            f"{tag()} 🔔 触发到期任务: session={group.session} "
+            f"tasks={len(group.tasks)} [{task_summary}]{late_info}"
+        )
         try:
             await self._fire_with_llm(
                 group.session, group.tasks, group.is_late, group.late_minutes
@@ -250,6 +256,7 @@ class CalendarPlusPlugin(Star):
 
         # ---- 1. 构造 system_prompt ----
         system_parts = []
+        persona_prompt = ""
 
         # 人设 prompt（参考 emotion_favour 的简化方案）
         try:
@@ -271,9 +278,17 @@ class CalendarPlusPlugin(Star):
             system_parts.append(sleep_prompt)
 
         system_prompt = "\n\n".join(system_parts)
+        logger.debug(
+            f"{tag()} 🔧 主动消息 system_prompt: session={session} "
+            f"persona={len(persona_prompt)}字 guidance={len(guidance)}字 "
+            f"sleep={len(sleep_prompt)}字 → 合并 {len(system_prompt)} 字"
+        )
 
         # ---- 2. 拉对话历史（从 chat_memory 插件）----
         contexts = await self._fetch_history_contexts(session)
+        logger.debug(
+            f"{tag()} 🔧 主动消息 contexts: session={session} 拉取 {len(contexts)} 条历史"
+        )
 
         # ---- 3. 构造本轮 prompt ----
         # 日历任务到点动态查询当日事件（不依赖 task 入队时的快照，
@@ -291,9 +306,19 @@ class CalendarPlusPlugin(Star):
                 )
                 texts = [str(e.get("text", "")).strip() for e in today_events]
                 texts = [t for t in texts if t]
+                logger.info(
+                    f"{tag()} 📅 calendar 触发: session={session} "
+                    f"当日事件={len(texts)} 条"
+                    + (f" → {('、'.join(texts))[:80]}" if texts else "")
+                )
                 if texts:
                     parts.append(f"今天是 {'、'.join(texts)}，可自然提一下")
             elif t.kind == "followup":
+                hint_preview = (t.hint or "(无承诺内容)")[:80]
+                logger.info(
+                    f"{tag()} 📝 followup 触发: id={t.id[:8]} session={session} "
+                    f"target={t.target_user_id or '-'} hint={hint_preview}"
+                )
                 if t.hint:
                     parts.append(f"你之前承诺过：{t.hint}。现在到点了，请继续")
                 else:
@@ -314,6 +339,11 @@ class CalendarPlusPlugin(Star):
         # 多段输出格式提示：让 LLM 用空行分段，发送时按 \n 切成独立消息
         prompt = f"{prompt}\n\n（如需分多段表达，用空行分隔，每段将作为独立消息发出）"
 
+        # debug：打印最终 prompt（完整内容）
+        logger.debug(
+            f"{tag()} 🔧 主动消息 prompt 最终({len(prompt)} 字):\n{prompt}"
+        )
+
         # ---- 4. 调 LLM ----
         try:
             llm_kwargs = {
@@ -333,6 +363,11 @@ class CalendarPlusPlugin(Star):
                 logger.error(f"{tag()} ❌ 无法确定 provider，跳过 session={session}")
                 return
             llm_kwargs["chat_provider_id"] = provider_id
+            logger.debug(
+                f"{tag()} 🔧 主动消息 调 LLM: session={session} provider={provider_id} "
+                f"system={len(system_prompt)}字 prompt={len(prompt)}字 "
+                f"contexts={'是' if contexts else '否'}({len(contexts)}条)"
+            )
             llm_response = await self.context.llm_generate(**llm_kwargs)
             if not llm_response or llm_response.role != "assistant":
                 logger.error(
@@ -970,12 +1005,26 @@ class CalendarPlusPlugin(Star):
         hint: str = "",
     ) -> str:
         """
-        当你对当前对话承诺「X 分钟后再继续/再说某事」时调用此工具。
-        到点时插件会带完整人设/历史/状态重新唤醒你，由你生成符合人设的回复。
+        当以下任一情况发生时调用此工具：
+
+        1. 你对当前对话承诺「X 分钟后再继续/再说某事」（用户明确要求提醒、晚点再聊）。
+        2. 用户请你执行耗时的现实任务（如买水、跑腿、查资料、做饭），但你作为虚拟人格
+           无法实际执行——可模拟「已去执行」的过程：估算合理耗时后调用此工具，
+           到点时插件重新唤醒你，由你以「任务已完成」的口吻继续对话，让体验更拟人。
+
+        约束：仅在用户**明确**请求执行现实任务、或**明确**要求稍后提醒时调用；
+        闲聊、已完成的事、用户没请你做的事不要触发，避免滥用。
+
+        到点时插件会带完整人设/历史/状态重新唤醒你，由你看到 hint 文本，生成符合人设的回复。
 
         Args:
-            delay_minutes(int): 几分钟后触发（范围 1-1440，即最多 24 小时）
-            hint(string): 可选备忘——到点时你会看到这条文本，提醒当时承诺了什么
+            delay_minutes(int): 几分钟后触发（范围 1-1440，即最多 24 小时）。
+                场景 1：用户指定的时间。
+                场景 2：你估算的现实任务合理耗时（买水约 5 分钟、跑腿约 30 分钟、电影约 2 小时）。
+            hint(string): 到点时你会看到这条文本作为备忘，要写得让「未来的你」能延续当时状态。
+                场景 1 必填：承诺了什么、要继续什么。
+                场景 2 必填：模拟执行了什么任务、到点该以什么口吻汇报
+                （如「假装去买了水，告诉用户水买回来了，可附上虚构的细节」）。
         """
         reminder_cfg = self.config.get("reminder", {})
         if not reminder_cfg.get("enable_reminder", False):
@@ -1007,7 +1056,17 @@ class CalendarPlusPlugin(Star):
             target_user_id=target_uid,
         )
         hint_preview = f"（备忘：{(hint or '').strip()[:30]}）" if (hint or "").strip() else ""
-        return f"已安排 {delay} 分钟后（{fire_at.strftime('%H:%M')}）主动发消息{hint_preview}"
+        time_str = fire_at.strftime('%H:%M')
+        return (
+            f"已安排 {delay} 分钟后（{time_str}）触发主动消息{hint_preview}。\n"
+            f"\n"
+            f"<REPLY_GUIDE>\n"
+            f"是否回复用户由你判断：\n"
+            f"- 若你刚才已向用户说明过此事（承诺过/确认过），本轮可直接返回空回复，不要重复；\n"
+            f"- 若你刚才未提及此事（如直接调用了工具），请用一两句话简短告知用户已安排。\n"
+            f"仅在确有新信息需要补充时才说话。返回空回复是允许的。\n"
+            f"</REPLY_GUIDE>"
+        )
 
     # ==================== 辅助函数 ====================
 

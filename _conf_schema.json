@@ -140,7 +140,7 @@
                 "description": "✅ 启用主动提醒",
                 "type": "bool",
                 "default": false,
-                "hint": "启用后启动后台调度循环：当日事项在指定时刻主动发送到白名单会话；LLM 也可通过 schedule_followup 工具自行安排后续主动消息"
+                "hint": "启用后启动后台调度循环：当日全部日历事件（内置节日/节气 + 用户自定义事件）在指定时刻合并主动发送到白名单会话；LLM 也可通过 schedule_followup 工具自行安排后续主动消息"
             },
             "reminder_targets": {
                 "description": "📋 提醒目标会话白名单",
@@ -149,10 +149,10 @@
                 "hint": "每行一个完整 UMO 字符串（如 aiocqhttp:GroupMessage:123456789 或 aiocqhttp:FriendMessage:987654321）。仅这些会话会收到主动提醒；LLM 在非白名单会话调用 schedule_followup 会被拒绝"
             },
             "reminder_time": {
-                "description": "⏰ 当日事项发送时刻",
+                "description": "⏰ 当日日历事件发送时刻",
                 "type": "string",
                 "default": "09:00",
-                "hint": "格式 HH:MM（24 小时制）。每日 0 点扫描当天事项，在此时刻发到白名单会话"
+                "hint": "格式 HH:MM（24 小时制）。每日 0 点扫描当日全部日历事件（内置节日/节气 + 用户自定义事件），在此时刻合并发到白名单会话"
             },
             "reminder_max_late_minutes": {
                 "description": "⏳ 迟到容忍窗口（分钟）",
