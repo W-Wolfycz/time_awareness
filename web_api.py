@@ -16,7 +16,7 @@ time_awareness Web API
 
 import json
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import yaml
 from quart import jsonify, request
@@ -25,7 +25,7 @@ from astrbot.api import logger
 
 from .core.calendar_store import calendar_store
 from .log import tag
-from .utils.time_utils import get_now
+from .utils.time_utils import get_now, get_tz
 
 
 PLUGIN_NAME = "time_awareness"
@@ -212,6 +212,89 @@ def register_web_apis(context, plugin) -> None:
         except Exception as e:
             return _internal_error(e)
 
+    # ==================== 端点：tasks/options ====================
+
+    async def get_tasks_options():
+        try:
+            sessions = plugin._reminder_targets()
+            now = get_now(plugin.config, plugin._astrbot_config())
+            tz = get_tz(plugin.config, plugin._astrbot_config())
+            tz_label = str(tz) if tz is not None else "系统本地（未配置时区）"
+            # datetime-local 默认值：当前时间 + 10 分钟（naive 截到分钟）
+            default_local = (now + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M")
+            return _ok(
+                sessions=sessions,
+                now_iso=now.isoformat(),
+                tz_label=tz_label,
+                default_fire_at_local=default_local,
+            )
+        except Exception as e:
+            return _internal_error(e)
+
+    # ==================== 端点：tasks/create ====================
+
+    async def create_task():
+        try:
+            data = await request.get_json() or {}
+            session = str(data.get("session", "")).strip()
+            fire_at_local = str(data.get("fire_at_local", "")).strip()
+            hint = str(data.get("hint", "")).strip()
+            target_user_id = str(data.get("target_user_id", "")).strip()
+
+            # 1) session 白名单硬校验
+            if not session:
+                return _err("session 不能为空", 400)
+            allowed = plugin._reminder_targets()
+            if session not in allowed:
+                return _err("该会话不在 reminder_targets 白名单内", 400)
+
+            # 2) hint 非空 + 长度
+            if not hint:
+                return _err("hint 不能为空", 400)
+            if len(hint) > 500:
+                return _err("hint 长度不能超过 500 字", 400)
+
+            # 3) target_user_id 长度（可空）
+            if len(target_user_id) > 64:
+                return _err("target_user_id 长度不能超过 64 字符", 400)
+
+            # 4) fire_at_local 解析（datetime-local 格式：YYYY-MM-DDTHH:MM）
+            try:
+                naive = datetime.fromisoformat(fire_at_local)
+            except ValueError:
+                return _err("fire_at_local 格式错误，需 YYYY-MM-DDTHH:MM", 400)
+
+            # 5) 时区 localize（tz=None 时保持 naive，与系统 now 同源）
+            tz = get_tz(plugin.config, plugin._astrbot_config())
+            fire_at = naive.replace(tzinfo=tz) if tz is not None else naive
+
+            # 6) 时间窗口校验（必须晚于 now+60s；上限 365 天防误填）
+            now = get_now(plugin.config, plugin._astrbot_config())
+            min_fire = now + timedelta(seconds=60)
+            max_fire = now + timedelta(days=365)
+            if fire_at <= min_fire:
+                return _err(
+                    f"触发时间必须晚于当前时间至少 1 分钟（当前 {now.isoformat()}）",
+                    400,
+                )
+            if fire_at > max_fire:
+                return _err("触发时间不能超过 365 天后", 400)
+
+            # 7) 入队
+            task = scheduler.add_user_task(
+                session=session,
+                fire_at=fire_at,
+                hint=hint,
+                target_user_id=target_user_id,
+            )
+            logger.info(
+                f"{tag()} 🧑 WebUI 创建手动提醒: id={task.id[:8]} session={session} "
+                f"fire_at={fire_at.isoformat()}"
+            )
+            return _ok(task_id=task.id, fire_at_iso=fire_at.isoformat())
+        except Exception as e:
+            return _internal_error(e)
+
     # ==================== 端点：config/schema（只读） ====================
 
     async def get_config_schema():
@@ -263,10 +346,16 @@ def register_web_apis(context, plugin) -> None:
         f"/{PLUGIN_NAME}/tasks/list", get_tasks_list, ["GET"], "获取 pending 任务列表"
     )
     context.register_web_api(
+        f"/{PLUGIN_NAME}/tasks/options", get_tasks_options, ["GET"], "获取新增任务选项（白名单会话/时区）"
+    )
+    context.register_web_api(
+        f"/{PLUGIN_NAME}/tasks/create", create_task, ["POST"], "新增手动提醒任务"
+    )
+    context.register_web_api(
         f"/{PLUGIN_NAME}/tasks/cancel", cancel_task, ["POST"], "取消任务"
     )
     context.register_web_api(
         f"/{PLUGIN_NAME}/config/schema", get_config_schema, ["GET"], "获取配置（只读）"
     )
 
-    logger.info(f"{tag()} ✅ Web API 已注册（共 6 个端点）")
+    logger.info(f"{tag()} ✅ Web API 已注册（共 8 个端点）")

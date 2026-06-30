@@ -88,6 +88,10 @@
 
         <!-- ===== 任务 ===== -->
         <section class="view" data-view="tasks">
+          <div class="tasks-toolbar">
+            <div class="tasks-toolbar-hint">仅可向 reminder_targets 白名单会话安排提醒</div>
+            <button class="btn btn-primary btn-sm" id="task-create-btn">+ 新增任务</button>
+          </div>
           <div id="tasks-content">
             <div class="loading-wrap"><span class="spinner"></span> 加载中...</div>
           </div>
@@ -115,6 +119,35 @@
       <div class="modal-body" id="day-modal-body"></div>
       <div class="modal-actions">
         <button class="btn" id="day-modal-close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新增任务 modal -->
+  <div class="modal-overlay" id="task-create-modal">
+    <div class="modal" style="max-width: 520px;">
+      <div class="modal-title">新增手动提醒</div>
+      <div class="modal-body">
+        <div class="form-row">
+          <label class="form-label" for="tf-session">目标会话</label>
+          <select id="tf-session" class="form-input"></select>
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="tf-fire">触发时间 <span id="tf-tz-label" class="form-hint"></span></label>
+          <input type="datetime-local" id="tf-fire" class="form-input" />
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="tf-hint">提醒内容 <span class="form-hint">（必填，最多 500 字）</span></label>
+          <textarea id="tf-hint" class="form-input" rows="3" maxlength="500"></textarea>
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="tf-target">At 目标用户 ID <span class="form-hint">（可空；群聊场景前置 At）</span></label>
+          <input type="text" id="tf-target" class="form-input" maxlength="64" placeholder="留空则不 At" />
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="tf-cancel">取消</button>
+        <button class="btn btn-primary" id="tf-submit">创建</button>
       </div>
     </div>
   </div>

@@ -17,11 +17,12 @@ import asyncio
 import datetime
 import os
 import random
+import re
 
 from astrbot.api import AstrBotConfig
 from .log import logger, configure as configure_log, tag
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.provider import ProviderRequest
+from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 
 from .constants import (
@@ -51,6 +52,13 @@ from .utils.time_utils import get_now, get_sleep_prompt_if_active, get_tz
 from .web_api import register_web_apis
 
 PLUGIN_DATA_DIR_NAME = "time_awareness"
+
+# 匹配 LLM 回复中误输出的 <time>...</time> 标签（注入用，不应出现在回复正文）。
+# 同时覆盖成对标签、自闭合、单独开/闭标签、带属性等形式。
+_TIME_TAG_PATTERN = re.compile(
+    r'<time(?:\s[^>]*)?>.*?</time>|</?time(?:\s[^>]*)?/?>',
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class CalendarPlusPlugin(Star):
@@ -323,10 +331,20 @@ class CalendarPlusPlugin(Star):
                     parts.append(f"你之前承诺过：{t.hint}。现在到点了，请继续")
                 else:
                     parts.append("你之前承诺过现在到点了，请按当时承诺继续")
+            elif t.kind == "user":
+                hint_preview = (t.hint or "(无内容)")[:80]
+                logger.info(
+                    f"{tag()} 🧑 user 触发: id={t.id[:8]} session={session} "
+                    f"target={t.target_user_id or '-'} hint={hint_preview}"
+                )
+                if t.hint:
+                    parts.append(f"到点了，请主动提起：{t.hint}")
+                else:
+                    parts.append("到点了，请主动发一条问候/消息")
 
         prompt = "\n".join(parts)
         if not prompt.strip():
-            # 当日事项为空且无 followup 提示 → 无内容可发，跳过
+            # 当日事项为空且无 followup/user 提示 → 无内容可发，跳过
             logger.info(f"{tag()} ℹ️ 跳过空提醒 session={session} tasks={len(tasks)}")
             return
 
@@ -378,12 +396,12 @@ class CalendarPlusPlugin(Star):
             if not reply:
                 logger.warning(f"{tag()} ⚠️ LLM 返回空回复 session={session}")
                 return
-            # 群聊 + followup + 有 target 时前置 At；calendar 群发不 at，私聊一对一无需 at
+            # 群聊 + followup/user + 有 target 时前置 At；calendar 群发不 at，私聊一对一无需 at
             is_group = "GroupMessage" in session
             at_uid = ""
             if is_group:
                 for t in tasks:
-                    if t.kind == "followup" and t.target_user_id:
+                    if t.kind in ("followup", "user") and t.target_user_id:
                         at_uid = t.target_user_id
                         break
 
@@ -518,6 +536,20 @@ class CalendarPlusPlugin(Star):
             logger.warning(f"{tag()} ⚠️ reminder_time 格式错误: {time_str}，回退 09:00")
             fire_at = now.replace(hour=9, minute=0, second=0, microsecond=0)
 
+        # 防御：跨日扫描在午夜前几毫秒醒来时，get_now() 仍是昨天，
+        # replace(hour=9) 会得到昨天 09:00（已过去 15 小时）。
+        # 与 scheduler._cleanup_expired 行为对齐：超过 max_late 容忍窗口直接跳过，
+        # 等下一个扫描周期（次日 0 点）重新入队。
+        max_late = int(reminder_cfg.get("reminder_max_late_minutes", 60) or 60)
+        cutoff = now - datetime.timedelta(minutes=max_late)
+        if fire_at < cutoff:
+            logger.warning(
+                f"{tag()} ⚠️ 跳过今日提醒入队：fire_at={fire_at.isoformat()} "
+                f"now={now.isoformat()} 已超出 {max_late} 分钟容忍窗口"
+                f"（疑似跨日扫描时钟漂移导致 now 仍是昨天）"
+            )
+            return 0
+
         enqueued = 0
         for session in targets:
             if self.scheduler.has_calendar_task_for_session_today(session, today):
@@ -634,6 +666,25 @@ class CalendarPlusPlugin(Star):
                 self._append_dynamic_content(req, sleep_prompt)
         except Exception as e:
             logger.error(f"{tag(event)} ❌ on_llm_request 注入失败: {e}")
+
+    @filter.on_llm_response()
+    async def strip_time_tags_from_response(
+        self,
+        event: AstrMessageEvent,
+        response: LLMResponse,
+    ) -> None:
+        """剥掉 LLM 回复中误模仿的 <time>...</time> 标签。
+
+        历史对话中我们用 <time> 包裹时间戳注入，部分 LLM 会模仿该格式输出；
+        此钩子在回复落盘前清洗，确保用户看到的是干净正文。
+        """
+        text = response.completion_text or ""
+        if not text or "<time" not in text.lower():
+            return
+        cleaned = _TIME_TAG_PATTERN.sub("", text)
+        if cleaned != text:
+            response.completion_text = cleaned
+            logger.debug(f"{tag(event)} 🧹 已剥离 <time> 标签")
 
     # ==================== 命令树 ====================
 

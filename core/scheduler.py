@@ -47,11 +47,11 @@ class Task:
     """单条提醒任务。"""
 
     id: str
-    kind: str  # "calendar" | "followup"
+    kind: str  # "calendar" | "followup" | "user"
     session: str
     fire_at: datetime.datetime
     hint: str = ""
-    target_user_id: str = ""  # followup 群聊场景的 at 目标（承诺发起人）
+    target_user_id: str = ""  # followup/user 群聊场景的 at 目标（承诺发起人或手动 At）
     sent: bool = False
     given_up: bool = False
     created_at: datetime.datetime = field(default_factory=datetime.datetime.now)
@@ -220,6 +220,35 @@ class ReminderScheduler:
         )
         return task
 
+    def add_user_task(
+        self,
+        session: str,
+        fire_at: datetime.datetime,
+        hint: str,
+        target_user_id: str = "",
+    ) -> Task:
+        """入队 WebUI 手动创建的提醒任务。
+
+        与 followup 的区别：语义独立（"到点主动提起 X" 而非"承诺了 X"），
+        触发时的 prompt 由 main._fire_with_llm 的 user 分支单独构造。
+        """
+        task = Task(
+            id=uuid.uuid4().hex,
+            kind="user",
+            session=session,
+            fire_at=fire_at,
+            hint=hint,
+            target_user_id=target_user_id,
+        )
+        self._tasks.append(task)
+        self.save()
+        self._wake()
+        logger.debug(
+            f"{tag()} 🧑 已入队手动提醒: session={session} "
+            f"fire_at={fire_at.isoformat()} target_user_id={target_user_id or '-'}"
+        )
+        return task
+
     # ==================== 调度循环 ====================
 
     def start(self) -> None:
@@ -282,6 +311,9 @@ class ReminderScheduler:
 
                 # 处理到期任务
                 now = self._now()
+                # 防御性重跑清理：被 wake() 提前唤醒时（通常是 add_*_task 入队新任务），
+                # 循环不会回到顶部的 cleanup，可能让带过去 fire_at 的新任务绕过过期判定直接触发。
+                self._cleanup_expired(now)
                 groups = self._pop_due(now)
                 for group in groups:
                     try:

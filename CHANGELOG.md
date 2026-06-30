@@ -1,5 +1,21 @@
 # 更新日志
 
+## 1.3.0
+2026-06-30
+
+### 新增
+- **WebUI 任务 tab「新增任务」入口**：管理员可在 webui 直接安排一次性手动提醒，到点由 LLM 主动开口。新增 `kind="user"` 任务分支，与现有 calendar/followup 同群合并触发。
+- **Web API（2 端点）**：
+  - `POST /tasks/create`：硬校验 session 必须在 `reminder_targets` 白名单内；时间窗口 `now+60s ~ now+365d`；时区由后端 `get_tz()` 锚定（前端 datetime-local naive → 后端 `replace(tzinfo=tz)` localize）
+  - `GET /tasks/options`：返回白名单会话列表、当前时区 label、默认时间（now+10min，naive）
+- 任务列表新增「手动」badge 区分用户创建的提醒（绿色 success）
+
+### 变更
+- `_fire_with_llm` 新增 `user` kind 分支，prompt 语义为「到点了，请主动提起：X」（区别于 followup 的「承诺过」语境，避免 LLM 误判）
+- 群聊 At 提取逻辑兼容 `user` kind 的 `target_user_id`
+- `scheduler.Task.kind` 注释扩展为 `"calendar" | "followup" | "user"`，新增 `add_user_task` 入队方法
+- Web API 端点总数从 6 → 8
+
 ## 1.2.0
 2026-06-29
 

@@ -17,6 +17,7 @@ const state = {
   stats: null,
   tasks: [],
   about: null,
+  taskOptions: null, // { sessions, now_iso, tz_label, default_fire_at_local }
 };
 
 const VIEW_TITLES = {
@@ -61,6 +62,8 @@ const api = {
   getMonth: (year, month) => apiGet('calendar/month', { year, month }),
   getTasks: () => apiGet('tasks/list'),
   cancelTask: (task_id) => apiPost('tasks/cancel', { task_id }),
+  getTaskOptions: () => apiGet('tasks/options'),
+  createTask: (payload) => apiPost('tasks/create', payload),
 };
 
 /** 等待桥接 SDK 与父窗口握手完成。降级模式立即返回。 */
@@ -323,9 +326,14 @@ async function renderTasks() {
     }
 
     const rows = state.tasks.map(t => {
-      const kindBadge = t.kind === 'calendar'
-        ? '<span class="badge badge-primary">日历</span>'
-        : '<span class="badge badge-warning">后续</span>';
+      let kindBadge;
+      if (t.kind === 'calendar') {
+        kindBadge = '<span class="badge badge-primary">日历</span>';
+      } else if (t.kind === 'user') {
+        kindBadge = '<span class="badge badge-success">手动</span>';
+      } else {
+        kindBadge = '<span class="badge badge-warning">后续</span>';
+      }
       const targetInfo = t.target_user_id
         ? ` → <code style="font-family: var(--mono); color: var(--text-muted);">${escapeHtml(t.target_user_id)}</code>`
         : '';
@@ -374,9 +382,14 @@ async function renderTasks() {
 }
 
 function askCancelTask(task) {
-  const detail = task.kind === 'calendar'
-    ? `日历提醒（${formatIsoLocal(task.fire_at_iso)}）`
-    : `后续任务（${formatIsoLocal(task.fire_at_iso)}）：${task.hint || '—'}`;
+  let detail;
+  if (task.kind === 'calendar') {
+    detail = `日历提醒（${formatIsoLocal(task.fire_at_iso)}）`;
+  } else if (task.kind === 'user') {
+    detail = `手动提醒（${formatIsoLocal(task.fire_at_iso)}）：${task.hint || '—'}`;
+  } else {
+    detail = `后续任务（${formatIsoLocal(task.fire_at_iso)}）：${task.hint || '—'}`;
+  }
   showConfirm('取消此任务？', detail, async () => {
     try {
       const resp = await api.cancelTask(task.id);
@@ -392,6 +405,83 @@ function askCancelTask(task) {
       toast('error', `取消失败: ${e.message}`);
     }
   });
+}
+
+// ==================== [6b] 新增任务 modal ====================
+
+async function openCreateTaskModal() {
+  // 拉取 options（白名单为空则提前提示）
+  let opts;
+  try {
+    const resp = await api.getTaskOptions();
+    if (!resp.success) throw new Error(resp.error || '获取选项失败');
+    opts = resp;
+  } catch (e) {
+    toast('error', `无法加载选项：${e.message}`);
+    return;
+  }
+  state.taskOptions = opts;
+
+  if (!opts.sessions || opts.sessions.length === 0) {
+    toast('info', 'reminder_targets 为空，请先在配置里添加白名单会话');
+    return;
+  }
+
+  // 填充表单
+  const sel = document.getElementById('tf-session');
+  sel.innerHTML = opts.sessions
+    .map(s => `<option value="${escapeAttr(s)}">${escapeHtml(s)}</option>`)
+    .join('');
+  document.getElementById('tf-fire').value = opts.default_fire_at_local;
+  document.getElementById('tf-tz-label').textContent = `(时区: ${opts.tz_label})`;
+  document.getElementById('tf-hint').value = '';
+  document.getElementById('tf-target').value = '';
+
+  document.getElementById('task-create-modal').classList.add('active');
+}
+
+async function submitCreateTask() {
+  const session = document.getElementById('tf-session').value;
+  const fire_at_local = document.getElementById('tf-fire').value;
+  const hint = document.getElementById('tf-hint').value.trim();
+  const target_user_id = document.getElementById('tf-target').value.trim();
+
+  // 体验性预检（非硬约束，后端会再校验）
+  if (!fire_at_local) { toast('error', '请填写触发时间'); return; }
+  if (!hint) { toast('error', '请填写提醒内容'); return; }
+
+  // 预检：明显过去（用后端 now_iso 粗筛，避免客户端时钟偏差；宁可漏过不误拦）
+  if (state.taskOptions && state.taskOptions.now_iso) {
+    const nowMs = Date.parse(state.taskOptions.now_iso);
+    // naive ISO 用 Date.parse 会被浏览器当本地时间解析；只做粗筛
+    const fireMs = Date.parse(fire_at_local);
+    if (!isNaN(nowMs) && !isNaN(fireMs) && fireMs - nowMs < 60000) {
+      toast('error', '触发时间必须晚于当前时间至少 1 分钟');
+      return;
+    }
+  }
+
+  const submitBtn = document.getElementById('tf-submit');
+  submitBtn.disabled = true;
+  try {
+    const resp = await api.createTask({ session, fire_at_local, hint, target_user_id });
+    if (!resp.success) {
+      toast('error', resp.error || '创建失败');
+      return;
+    }
+    document.getElementById('task-create-modal').classList.remove('active');
+    toast('success', '任务已创建');
+    renderTasks();
+    renderDashboard().catch(() => {});
+  } catch (e) {
+    toast('error', `创建失败：${e.message}`);
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+function closeCreateTaskModal() {
+  document.getElementById('task-create-modal').classList.remove('active');
 }
 
 // ==================== [7] modal / toast / tooltip 辅助 ====================
@@ -510,6 +600,13 @@ function bindNav() {
     if (e.target.id === 'confirm-modal') {
       document.getElementById('confirm-modal').classList.remove('active');
     }
+  });
+  // 新增任务 modal
+  document.getElementById('task-create-btn').addEventListener('click', openCreateTaskModal);
+  document.getElementById('tf-cancel').addEventListener('click', closeCreateTaskModal);
+  document.getElementById('tf-submit').addEventListener('click', submitCreateTask);
+  document.getElementById('task-create-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'task-create-modal') closeCreateTaskModal();
   });
 }
 
