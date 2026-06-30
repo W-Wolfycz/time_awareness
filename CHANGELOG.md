@@ -1,5 +1,26 @@
 # 更新日志
 
+## 1.4.0
+2026-06-30
+
+### 新增
+- **单日日程表（时段状态感知）**：按时间段定义角色状态（晨起/元气/入夜/睡眠...），命中时段的描述通过 `{daily_schedule_state}` 占位符注入到时间感知 prompt
+- **配置 template_list 编辑**：AstrBot 主 webui 表单化添加时段，支持跨午夜（end < start 自动识别）
+- **`/schedule create` 命令**：LLM 自主生成日程表（基于配置世界观或当前人设 prompt），与 `/calendar create` 调用模式一致
+- **`/schedule show|help` 命令**：列出时段（高亮当前命中段）、显示帮助
+- 启动时时段重叠检测（warning 不强制 reject；多段命中同一时刻取列表中靠前的）
+- 引入 `config_version` 字段（自动管理，链式迁移框架）
+
+### 变更（破坏性）
+- **删除 sleep_mode_enabled / sleep_hours / sleep_prompt 三字段**：合并到 `daily_schedule.schedule_templates` 作为睡眠时段实例
+- 自动迁移：v0 配置启用的睡眠窗口原样转为新格式（保留自定义 sleep_prompt 文本）
+- sleep_prompt 注入位点从「user message 后 extra_user_content_parts」统一到「system_prompt 占位符」（与日程表机制一致；每轮 LLM 请求都带，等价强度）
+- 默认时间引导 prompt 规则 3 改写为「参考下方当前时段状态自然带入人设」，新增「当前时段状态：{daily_schedule_state}」一行
+
+### 移除
+- `is_sleep_time` / `get_sleep_prompt_if_active` 工具函数（time_utils.py）
+- `_append_dynamic_content` 钩子（main.py，仅 sleep_prompt 使用）
+
 ## 1.3.0
 2026-06-30
 

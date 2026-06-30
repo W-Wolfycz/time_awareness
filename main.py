@@ -27,9 +27,11 @@ from astrbot.api.star import Context, Star, StarTools
 
 from .constants import (
     DEFAULT_LATE_PROMPT,
+    DEFAULT_SCHEDULE_GENERATE_SYSTEM_PROMPT,
     DEFAULT_TIME_GUIDANCE_PROMPT,
     LEGACY_DEFAULT_TIME_GUIDANCE_PROMPT,
 )
+from .migrate import migrate as migrate_config
 from .core.builtin_events import (
     ALL_CATEGORIES,
     CATEGORY_ALMANAC,
@@ -48,7 +50,7 @@ from .llm.calendar_generator import (
     build_system_prompt,
     generate_calendar_events,
 )
-from .utils.time_utils import get_now, get_sleep_prompt_if_active, get_tz
+from .utils.time_utils import find_active_schedule_slot, get_now, get_tz
 from .web_api import register_web_apis
 
 PLUGIN_DATA_DIR_NAME = "time_awareness"
@@ -68,6 +70,20 @@ class CalendarPlusPlugin(Star):
         super().__init__(context)
         self.config = config or {}
 
+        # 配置链式迁移：v0 → v1（sleep_* → daily_schedule.schedule_templates[0]）等
+        # 迁移幂等可重试，失败时保留原 config 不 bump 版本号
+        # 仅在真发生迁移时落盘，避免每次启动都写文件
+        try:
+            version_before = self.config.get("config_version", 0) if isinstance(self.config, dict) else 0
+            migrated = migrate_config(self.config)
+            if migrated is not self.config:
+                self.config = migrated
+            version_after = self.config.get("config_version", 0) if isinstance(self.config, dict) else 0
+            if version_after != version_before:
+                self._try_save_config()
+        except Exception as e:
+            logger.warning(f"{tag()} ⚠️ 配置迁移调用异常（忽略，继续启动）: {e}")
+
         # 日志提级：debug → info（参照 chat_memory 的 debug_to_info 模式）
         # 日志前缀带 bot 实例标识：区分多 bot 共存场景（参照 emotion_favour）
         log_cfg = self.config.get("log", {})
@@ -75,6 +91,9 @@ class CalendarPlusPlugin(Star):
             debug_to_info=log_cfg.get("debug_to_info", False),
             log_with_bot_id=log_cfg.get("log_with_bot_id", False),
         )
+
+        # 启动后检测时段重叠（仅 warning）
+        self._check_schedule_overlap()
 
         # 数据目录
         try:
@@ -250,7 +269,8 @@ class CalendarPlusPlugin(Star):
         """合并多任务成一次 LLM 调用，把回复发出去。
 
         完整上下文：
-        - system_prompt = 人设 prompt + 时间引导 prompt + 睡眠提示（如在睡眠窗口）
+        - system_prompt = 人设 prompt + 时间引导 prompt（含 {daily_schedule_state} 占位符，
+          命中睡眠/清醒时段时自动展开为对应 state_prompt）
         - contexts（对话历史）= 从 chat_memory 插件按 (umo, cid) 拉取，不按用户过滤
           （群聊场景：整个群的所有人混合历史）。CM 未安装 / 拉取失败 → 降级为不带历史
         - prompt（本轮 user）= 各任务的提示文本拼接 + 迟到提示（如迟到）
@@ -275,21 +295,16 @@ class CalendarPlusPlugin(Star):
         except Exception as e:
             logger.warning(f"{tag()} ⚠️ 获取人设失败 session={session}: {e}")
 
-        # 时间引导 prompt（time_awareness 自己的）
+        # 时间引导 prompt（time_awareness 自己的；含 {daily_schedule_state} 占位符）
         guidance = self._resolve_placeholders(self._effective_time_guidance_prompt())
         if guidance:
             system_parts.append(guidance)
-
-        # 睡眠提示词（睡眠窗口内附加，让 LLM 回复带困意）
-        sleep_prompt = get_sleep_prompt_if_active(self.config, self._astrbot_config())
-        if sleep_prompt:
-            system_parts.append(sleep_prompt)
 
         system_prompt = "\n\n".join(system_parts)
         logger.debug(
             f"{tag()} 🔧 主动消息 system_prompt: session={session} "
             f"persona={len(persona_prompt)}字 guidance={len(guidance)}字 "
-            f"sleep={len(sleep_prompt)}字 → 合并 {len(system_prompt)} 字"
+            f"→ 合并 {len(system_prompt)} 字"
         )
 
         # ---- 2. 拉对话历史（从 chat_memory 插件）----
@@ -620,10 +635,92 @@ class CalendarPlusPlugin(Star):
             result.append(CATEGORY_ALMANAC)
         return result
 
+    def _resolve_schedule_state(self) -> str:
+        """{daily_schedule_state} 的取值：命中时段的 state_prompt；未命中返回占位文本。
+
+        - 未启用日程表感知 → 返回「未指定（按人设自然推断）」
+        - 启用但未命中任何时段（gap）→ 同上
+        - 命中时段但 state_prompt 为空 → 同上
+        """
+        ds = self.config.get("daily_schedule", {})
+        if not ds.get("enable_schedule", False):
+            return "未指定（按人设自然推断）"
+        now = get_now(self.config, self._astrbot_config())
+        slot = find_active_schedule_slot(ds, now)
+        if slot is None:
+            return "未指定（按人设自然推断）"
+        state = (slot.get("state_prompt") or "").strip()
+        return state or "未指定（按人设自然推断）"
+
     def _resolve_placeholders(self, text: str) -> str:
         if not text:
             return ""
-        return text.replace("{calendar_today}", self._resolve_calendar_today())
+        text = text.replace("{calendar_today}", self._resolve_calendar_today())
+        text = text.replace("{daily_schedule_state}", self._resolve_schedule_state())
+        return text
+
+    def _try_save_config(self) -> None:
+        """落盘 self.config（迁移 / 命令覆盖后调用）。
+
+        AstrBotConfig 是 dict 子类，持久化方法是 ``save_config()``（不是 ``save``）。
+        失败仅 warning：内存中已迁移，下次启动会重跑，不影响运行。
+        """
+        save_fn = getattr(self.config, "save_config", None)
+        if not callable(save_fn):
+            logger.debug(f"{tag()} self.config 无 save_config 方法，跳过落盘")
+            return
+        try:
+            save_fn()
+            logger.debug(f"{tag()} 配置已落盘")
+        except Exception as e:
+            logger.warning(f"{tag()} ⚠️ 配置落盘失败（不致命，下次启动会重跑）: {e}")
+
+    def _check_schedule_overlap(self) -> None:
+        """检测 schedule_templates 时段重叠，仅 warning 不强制 reject。
+
+        重叠定义：两个时段在某个时间点同时命中。跨午夜时段（end < start）展开为
+        [start, 24:00) ∪ [00:00, end) 后再比较。多个时段命中同一时刻即视为重叠。
+        """
+        slots = self.config.get("daily_schedule", {}).get("schedule_templates") or []
+        if not isinstance(slots, list) or len(slots) < 2:
+            return
+
+        def to_ranges(s: dict) -> list[tuple[int, int]]:
+            """把单个时段转成 [(start_min, end_min), ...] 的 24h 分钟表示（已展开跨午夜）。"""
+            start = str(s.get("start_time", "")).strip()
+            end = str(s.get("end_time", "")).strip()
+            try:
+                sh, sm = map(int, start.split(":"))
+                eh, em = map(int, end.split(":"))
+            except (ValueError, AttributeError):
+                return []
+            s_min = sh * 60 + sm
+            e_min = eh * 60 + em
+            if s_min == e_min:
+                return []
+            if s_min < e_min:
+                return [(s_min, e_min)]
+            # 跨午夜：拆成两段
+            return [(s_min, 24 * 60), (0, e_min)]
+
+        # 用位图（每分钟一个 bit）检测重叠
+        occupied: list[int | None] = [None] * (24 * 60)  # 每分钟记录第一个占用的 slot 索引
+        for idx, slot in enumerate(slots):
+            if not isinstance(slot, dict):
+                continue
+            for s_min, e_min in to_ranges(slot):
+                for m in range(s_min, e_min):
+                    if occupied[m] is not None:
+                        other_idx = occupied[m]
+                        logger.warning(
+                            f"{tag()} ⚠️ 日程表时段重叠："
+                            f"slot#{idx}({slot.get('start_time')}-{slot.get('end_time')}) "
+                            f"与 slot#{other_idx}("
+                            f"{slots[other_idx].get('start_time')}-{slots[other_idx].get('end_time')}) "
+                            f"在 {m // 60:02d}:{m % 60:02d} 重叠（行为：取列表中靠前的时段）"
+                        )
+                    else:
+                        occupied[m] = idx
 
     @staticmethod
     def _append_system_prompt(req, additional: str) -> None:
@@ -636,34 +733,16 @@ class CalendarPlusPlugin(Star):
         else:
             req.system_prompt = additional
 
-    @staticmethod
-    def _append_dynamic_content(req, text: str) -> None:
-        """将动态上下文追加到 extra_user_content_parts 末尾（位于本轮用户输入之后）。"""
-        text = (text or "").strip()
-        if not text:
-            return
-        try:
-            from astrbot.core.agent.message import TextPart
-        except ImportError:
-            logger.warning(f"{tag()} ⚠️ 无法导入 TextPart，跳过附带信息注入")
-            return
-        part = TextPart(text=text)
-        mark_as_temp = getattr(part, "mark_as_temp", None)
-        if callable(mark_as_temp):
-            part = mark_as_temp()
-        req.extra_user_content_parts.append(part)
-
     @filter.on_llm_request()
     async def inject_time_context(self, event: AstrMessageEvent, req: ProviderRequest):
-        """三件事：时间引导 prompt（静态）→ system_prompt；睡眠提示（动态）→ extra_user_content_parts；解析占位符。"""
+        """时间引导 prompt（含 {daily_schedule_state} 占位符）→ system_prompt 末尾。
+
+        sleep_prompt 已废弃：睡眠时段的 state_prompt 现在通过 {daily_schedule_state}
+        占位符统一走 system_prompt（与日程表机制一致）。
+        """
         try:
             guidance = self._resolve_placeholders(self._effective_time_guidance_prompt())
             self._append_system_prompt(req, guidance)
-
-            sleep_prompt = get_sleep_prompt_if_active(self.config, self._astrbot_config())
-            if sleep_prompt:
-                sleep_prompt = self._resolve_placeholders(sleep_prompt)
-                self._append_dynamic_content(req, sleep_prompt)
         except Exception as e:
             logger.error(f"{tag(event)} ❌ on_llm_request 注入失败: {e}")
 
@@ -1045,6 +1124,271 @@ class CalendarPlusPlugin(Star):
             "黄历": CATEGORY_ALMANAC, "老黄历": CATEGORY_ALMANAC, "almanac": CATEGORY_ALMANAC,
         }
         return mapping.get(text.lower(), "")
+
+    # ==================== 单日日程表 ====================
+
+    @filter.command_group("schedule")
+    def schedule_group(self):
+        """单日日程表管理命令组入口（时段状态感知）。"""
+
+    @schedule_group.command("help")
+    async def schedule_help(self, event: AstrMessageEvent):
+        """显示日程表命令帮助。"""
+        text = (
+            "[time_awareness 日程表命令]\n"
+            "/schedule show  — 列出当前所有时段（按开始时间排序）\n"
+            "/schedule create  — 按配置世界观或当前人设生成日程表（覆盖现有，管理员）\n"
+            "/schedule help  — 显示本帮助\n"
+            "\n"
+            "说明：\n"
+            "- 时段状态通过 {daily_schedule_state} 占位符注入到时间感知 prompt\n"
+            "- 未启用日程表感知时占位符返回「未指定（按人设自然推断）」\n"
+            "- 时段编辑也可在 AstrBot 主 webui 配置 daily_schedule.schedule_templates 完成\n"
+            "\n"
+            "时间格式：HH:MM（24 小时制）\n"
+            "- end_time < start_time 视为跨午夜（如 22:00→08:00）\n"
+            "- end_time exclusive：当前时间 < end_time 才算命中\n"
+            "\n"
+            "示例：\n"
+            "/schedule show  — 查看当前时段配置\n"
+            "/schedule create  — 用 AI 生成一整套作息表"
+        )
+        yield event.plain_result(text)
+
+    @schedule_group.command("show")
+    async def schedule_show(self, event: AstrMessageEvent):
+        """列出当前所有时段（按 start_time 排序）。"""
+        ds = self.config.get("daily_schedule", {})
+        enabled = bool(ds.get("enable_schedule", False))
+        slots = ds.get("schedule_templates") or []
+        if not isinstance(slots, list):
+            slots = []
+
+        if not slots:
+            yield event.plain_result(
+                f"[日程表] 共 0 条时段（感知{'已启用' if enabled else '未启用'}）。\n"
+                f"用 /schedule create 让 AI 生成，或在主 webui 手动添加。"
+            )
+            return
+
+        def sort_key(s: dict) -> tuple[int, int]:
+            try:
+                h, m = str(s.get("start_time", "00:00")).split(":")
+                return (int(h), int(m))
+            except Exception:
+                return (99, 99)
+
+        ordered = sorted(
+            [s for s in slots if isinstance(s, dict)],
+            key=sort_key,
+        )
+
+        # 高亮当前命中的时段
+        now = get_now(self.config, self._astrbot_config())
+        active = find_active_schedule_slot(ds, now)
+        active_start = str((active or {}).get("start_time", "")).strip() if active else ""
+
+        lines = [f"[日程表 共 {len(ordered)} 条时段（感知{'已启用' if enabled else '未启用'}）]"]
+        for s in ordered:
+            start = str(s.get("start_time", "")).strip()
+            end = str(s.get("end_time", "")).strip()
+            state = (s.get("state_prompt") or "").strip() or "(无状态描述)"
+            # state 截断到 40 字，过长用省略号
+            state_preview = state if len(state) <= 40 else state[:37] + "..."
+            marker = " ← 当前" if start == active_start else ""
+            lines.append(f"  {start}-{end}{marker}  {state_preview}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @schedule_group.command("create")
+    async def schedule_create(self, event: AstrMessageEvent, confirm: str = ""):
+        """按配置里的世界观或当前人设生成日程表（覆盖现有 schedule_templates）。
+
+        优先级：
+        1. 配置 daily_schedule.ai_generate_worldview 非空 → 用之
+        2. 当前会话的人设 prompt 非空 → 用之作为世界观输入
+        3. 都为空 → 拒绝执行
+
+        已有现有时段时需显式追加 ``confirm`` 参数确认覆盖。
+        """
+        ds = self.config.get("daily_schedule", {})
+        theme = (ds.get("ai_generate_worldview", "") or "").strip()
+
+        # 人设兜底
+        persona_used = False
+        if not theme:
+            session = event.unified_msg_origin or ""
+            try:
+                persona = await self.context.persona_manager.get_default_persona_v3(session)
+                persona_prompt = (persona or {}).get("prompt") or ""
+            except Exception as e:
+                logger.warning(f"{tag()} ⚠️ 获取人设失败 session={session}: {e}")
+                persona_prompt = ""
+            if persona_prompt.strip():
+                theme = persona_prompt.strip()
+                persona_used = True
+
+        if not theme:
+            yield event.plain_result(
+                "未配置世界观，且当前会话没有人设 prompt。\n"
+                "请先在配置 daily_schedule.ai_generate_worldview 填写主题，"
+                "或为当前会话配置人设后重试。"
+            )
+            return
+
+        # 二次确认（覆盖现有 schedule_templates）
+        existing = ds.get("schedule_templates") or []
+        if isinstance(existing, list) and len(existing) > 0 and (confirm or "").strip().lower() != "confirm":
+            yield event.plain_result(
+                f"⚠️ 当前已有 {len(existing)} 条时段，本次生成会覆盖。\n"
+                f"确认覆盖请发送：/schedule create confirm"
+            )
+            return
+
+        async for msg in self._do_schedule_generate(event, theme, persona_used):
+            yield msg
+
+    async def _do_schedule_generate(
+        self, event: AstrMessageEvent, theme: str, persona_used: bool
+    ):
+        """实际执行 LLM 调用 + 解析 + 落盘。"""
+        ds = self.config.get("daily_schedule", {})
+        provider_id = (ds.get("ai_generate_provider_id", "") or "").strip()
+
+        source_tag = "当前人设" if persona_used else "配置世界观"
+        theme_preview = theme if len(theme) <= 60 else theme[:57] + "..."
+        yield event.plain_result(
+            f"正在调用 AI 生成日程表（来源：{source_tag}「{theme_preview}」），请稍候……"
+        )
+
+        # 调 LLM
+        try:
+            llm_kwargs = {
+                "prompt": theme,
+                "system_prompt": DEFAULT_SCHEDULE_GENERATE_SYSTEM_PROMPT,
+            }
+            if provider_id:
+                llm_kwargs["chat_provider_id"] = provider_id
+            llm_response = await self.context.llm_generate(**llm_kwargs)
+        except Exception as e:
+            logger.error(f"{tag()} ❌ AI 生成日程表 LLM 调用失败: {e}")
+            yield event.plain_result(f"AI 生成失败：{e}")
+            return
+
+        if not llm_response or llm_response.role != "assistant":
+            yield event.plain_result("AI 响应异常，请检查 provider 配置。")
+            return
+
+        raw_text = (llm_response.completion_text or "").strip()
+        slots_data = self._parse_schedule_json(raw_text)
+        if slots_data is None:
+            logger.error(
+                f"{tag()} ❌ AI 输出 JSON 解析失败，原文前 200 字: {raw_text[:200]}"
+            )
+            yield event.plain_result(
+                "AI 输出 JSON 解析失败。请稍后重试，或检查 provider 是否遵守系统提示词。"
+            )
+            return
+
+        # 转成 template_list 元素格式（带 __template_key 元字段）
+        new_slots = []
+        for item in slots_data:
+            slot = {
+                "__template_key": "time_slot",
+                "start_time": item["start"],
+                "end_time": item["end"],
+                "state_prompt": item["state"],
+            }
+            new_slots.append(slot)
+
+        # 写回 self.config（dict 视图）
+        if not isinstance(self.config.get("daily_schedule"), dict):
+            self.config["daily_schedule"] = {}
+        self.config["daily_schedule"]["schedule_templates"] = new_slots
+        self.config["daily_schedule"]["enable_schedule"] = True
+
+        # 落盘
+        self._try_save_config()
+
+        # 启动时重叠检测（迁移 / 命令覆盖都过一遍）
+        self._check_schedule_overlap()
+
+        now = get_now(self.config, self._astrbot_config())
+        active = find_active_schedule_slot(self.config.get("daily_schedule", {}), now)
+        active_info = ""
+        if active:
+            active_state = (active.get("state_prompt") or "").strip()
+            active_info = (
+                f"\n当前命中时段：{active.get('start_time')}-{active.get('end_time')}"
+                + (f"（{active_state[:40]}）" if active_state else "")
+            )
+
+        yield event.plain_result(
+            f"✅ 已生成 {len(new_slots)} 条时段并写入配置。\n"
+            f"来源：{source_tag}\n"
+            f"使用 /schedule show 查看完整列表。{active_info}"
+        )
+
+    @staticmethod
+    def _parse_schedule_json(text: str) -> list[dict] | None:
+        """解析 LLM 输出的日程表 JSON。
+
+        返回 [{"start": "HH:MM", "end": "HH:MM", "state": "..."}, ...]；
+        解析失败或字段不全返回 None。
+        """
+        import json
+
+        # 去掉可能的 Markdown 代码块包裹
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            # 去掉首尾 ``` 行
+            lines = cleaned.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines)
+
+        try:
+            data = json.loads(cleaned)
+        except (json.JSONDecodeError, ValueError):
+            # 尝试提取首个 [ 到 ] 之间的内容
+            match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+            if not match:
+                return None
+            try:
+                data = json.loads(match.group(0))
+            except (json.JSONDecodeError, ValueError):
+                return None
+
+        if not isinstance(data, list) or not data:
+            return None
+
+        result = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            start = str(item.get("start", "")).strip()
+            end = str(item.get("end", "")).strip()
+            state = str(item.get("state", "")).strip()
+            if not start or not end or not state:
+                continue
+            # 校验 HH:MM 格式
+            valid = True
+            for t in (start, end):
+                try:
+                    h, m = t.split(":")
+                    if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+                        valid = False
+                        break
+                except (ValueError, AttributeError):
+                    valid = False
+                    break
+            if not valid:
+                continue
+            result.append({"start": start, "end": end, "state": state})
+
+        return result if result else None
 
     # ==================== LLM 工具：schedule_followup ====================
 

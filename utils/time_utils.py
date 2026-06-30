@@ -1,14 +1,12 @@
 """
 时间工具模块。
 
-提供时间相关的工具函数：时区解析、当前时间、跨午夜时段判定、睡眠窗口检测。
+提供时间相关的工具函数：时区解析、当前时间、跨午夜时段判定、日程表时段命中。
 """
 
 import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ..log import logger, tag
-
-from ..constants import DEFAULT_SLEEP_PROMPT, LEGACY_DEFAULT_SLEEP_PROMPT
 
 
 
@@ -89,25 +87,54 @@ def is_in_time_range(time_range: str, tz=None) -> bool:
         return False
 
 
-def is_sleep_time(config: dict, astrbot_config=None) -> bool:
-    """检查当前是否处于睡眠时间段。"""
-    time_awareness_config = config.get("time_awareness", {})
-    if not time_awareness_config.get("sleep_mode_enabled", False):
-        return False
-    sleep_hours = time_awareness_config.get("sleep_hours", "22:00-8:00")
-    tz = get_tz(config, astrbot_config)
-    return is_in_time_range(sleep_hours, tz=tz)
+def find_active_schedule_slot(
+    daily_schedule_config: dict,
+    now: "datetime.datetime | None" = None,
+) -> dict | None:
+    """返回当前时间命中的时段 dict；未命中返回 None。
 
+    用于 {daily_schedule_state} 占位符解析。命中规则：
+    - 遍历 schedule_templates，每个时段用 _is_in_range 判断（支持跨午夜）
+    - end_time exclusive：当前时间 < end_time 才算命中，连续时段边界（如 08:00）不会双命中
+    - 多个时段命中时取列表顺序的第一个（运行期不重排）
 
-def get_sleep_prompt_if_active(config: dict, astrbot_config=None) -> str:
-    """获取睡眠提示文本。不在睡眠时段则返回空字符串。
-
-    用户配置为空或等于旧默认值时，回退到新默认值（与 constants.DEFAULT_SLEEP_PROMPT 一致）。
+    Args:
+        daily_schedule_config: config["daily_schedule"] 子字典
+        now: 已带正确时区（与 fire_at 同源）的当前时间；为 None 时取系统当前时间（naive）
     """
-    if not is_sleep_time(config, astrbot_config):
-        return ""
-    time_awareness_config = config.get("time_awareness", {})
-    custom = (time_awareness_config.get("sleep_prompt") or "").strip()
-    if not custom or custom == LEGACY_DEFAULT_SLEEP_PROMPT:
-        return DEFAULT_SLEEP_PROMPT
-    return custom
+    slots = daily_schedule_config.get("schedule_templates") or []
+    if not isinstance(slots, list) or not slots:
+        return None
+
+    if now is None:
+        now = datetime.datetime.now()
+
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        start = str(slot.get("start_time", "")).strip()
+        end = str(slot.get("end_time", "")).strip()
+        if not start or not end:
+            continue
+        if _is_in_range(now, f"{start}-{end}"):
+            return slot
+    return None
+
+
+def _is_in_range(now: "datetime.datetime", time_range: str) -> bool:
+    """检查 now 是否落在 time_range 内（end exclusive）。支持跨午夜。"""
+    try:
+        start_time, end_time = time_range.split("-")
+        start_hour, start_min = map(int, start_time.strip().split(":"))
+        end_hour, end_min = map(int, end_time.strip().split(":"))
+        current_minutes = now.hour * 60 + now.minute
+        start_minutes = start_hour * 60 + start_min
+        end_minutes = end_hour * 60 + end_min
+        if start_minutes > end_minutes:
+            # 跨午夜：当前 >= start 或 当前 < end（end 是次日时刻，exclusive）
+            return current_minutes >= start_minutes or current_minutes < end_minutes
+        else:
+            return start_minutes <= current_minutes < end_minutes
+    except Exception as e:
+        logger.warning(f"{tag()} ⚠️ 时段范围解析错误 '{time_range}': {e}")
+        return False
