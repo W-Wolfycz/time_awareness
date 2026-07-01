@@ -1,9 +1,9 @@
 name: time_awareness
-display_name: 时间感知与智能日历
+display_name: 时间感知增强
 short_desc: 时间引导、单日日程表、AI 世界观日历与现实日历事件（节气/假日）。
 desc: 为 LLM 注入自然时间表达引导、单日时段状态（日程表）、可 AI 生成的世界观日历（{calendar_today}/{daily_schedule_state} 占位符），以及现实日历事件（法定节假日、传统节日、节气等）。
-version: v1.4.0
-author: AstraSolis
+version: v1.5
+author: Wolfycz
 astrbot_version: ""
 tags: [ "时间感知", "日历", "日程表" ]
 repo: "https://github.com/W-Wolfycz/time_awareness"

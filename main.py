@@ -1,29 +1,32 @@
 """
-time_awareness — 时间感知与智能日历
+time_awareness — 时间感知增强
 
 为 LLM 注入：
-1. 静态：时间感知增强 prompt → system_prompt 末尾
-2. 动态：若处于睡眠窗口 → extra_user_content_parts
-3. 占位符：解析 {calendar_today}（在 1 / 2 文本上做 replace）
+1. 时间引导 prompt → system_prompt 末尾（含 {calendar_today} / {daily_schedule_state} 占位符）
+2. 命中日程表时段时，占位符展开为对应 state_prompt（睡眠段可用 <SLEEP_MODE> 包裹）
 
 日历管理通过聊天命令 `/calendar show|add|del|create|export|import|help`。
+日程表管理通过 `/schedule create|show|help`。
 
 主动提醒：
 - 当日日历事项在指定时刻主动发送到白名单会话
 - LLM 可通过 schedule_followup 工具自行安排"X 分钟后再说"
+- 发送阶段走 OnDecoratingResultEvent 装饰链（让 splitter_w 等装饰器接管分段）
 """
 
 import asyncio
 import datetime
 import os
-import random
-import re
 
 from astrbot.api import AstrBotConfig
 from .log import logger, configure as configure_log, tag
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
+from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
+from astrbot.core.platform.message_type import MessageType
+from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
 from .constants import (
     DEFAULT_LATE_PROMPT,
@@ -31,7 +34,6 @@ from .constants import (
     DEFAULT_TIME_GUIDANCE_PROMPT,
     LEGACY_DEFAULT_TIME_GUIDANCE_PROMPT,
 )
-from .migrate import migrate as migrate_config
 from .core.builtin_events import (
     ALL_CATEGORIES,
     CATEGORY_ALMANAC,
@@ -55,34 +57,12 @@ from .web_api import register_web_apis
 
 PLUGIN_DATA_DIR_NAME = "time_awareness"
 
-# 匹配 LLM 回复中误输出的 <time>...</time> 标签（注入用，不应出现在回复正文）。
-# 同时覆盖成对标签、自闭合、单独开/闭标签、带属性等形式。
-_TIME_TAG_PATTERN = re.compile(
-    r'<time(?:\s[^>]*)?>.*?</time>|</?time(?:\s[^>]*)?/?>',
-    re.IGNORECASE | re.DOTALL,
-)
-
-
 class CalendarPlusPlugin(Star):
     """时间感知 + 智能日历 + 主动提醒。"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config or {}
-
-        # 配置链式迁移：v0 → v1（sleep_* → daily_schedule.schedule_templates[0]）等
-        # 迁移幂等可重试，失败时保留原 config 不 bump 版本号
-        # 仅在真发生迁移时落盘，避免每次启动都写文件
-        try:
-            version_before = self.config.get("config_version", 0) if isinstance(self.config, dict) else 0
-            migrated = migrate_config(self.config)
-            if migrated is not self.config:
-                self.config = migrated
-            version_after = self.config.get("config_version", 0) if isinstance(self.config, dict) else 0
-            if version_after != version_before:
-                self._try_save_config()
-        except Exception as e:
-            logger.warning(f"{tag()} ⚠️ 配置迁移调用异常（忽略，继续启动）: {e}")
 
         # 日志提级：debug → info（参照 chat_memory 的 debug_to_info 模式）
         # 日志前缀带 bot 实例标识：区分多 bot 共存场景（参照 emotion_favour）
@@ -118,8 +98,6 @@ class CalendarPlusPlugin(Star):
         self._apply_reminder_config()
         # 每日 0 点扫描当天事项的 asyncio task
         self._daily_scan_task: asyncio.Task | None = None
-        # chat_memory 实例缓存（成功解析后缓存；失败不缓存以便下次重试）
-        self._chat_memory = None
 
         logger.info(f"{tag()} 插件已初始化，数据目录: {self.data_dir}")
 
@@ -271,9 +249,10 @@ class CalendarPlusPlugin(Star):
         完整上下文：
         - system_prompt = 人设 prompt + 时间引导 prompt（含 {daily_schedule_state} 占位符，
           命中睡眠/清醒时段时自动展开为对应 state_prompt）
-        - contexts（对话历史）= 从 chat_memory 插件按 (umo, cid) 拉取，不按用户过滤
-          （群聊场景：整个群的所有人混合历史）。CM 未安装 / 拉取失败 → 降级为不带历史
         - prompt（本轮 user）= 各任务的提示文本拼接 + 迟到提示（如迟到）
+
+        发送阶段走 OnDecoratingResultEvent 装饰链（仿 proactive_chat），
+        让 splitter_w / attool / wakepro 等装饰器改写结果链。
 
         日历任务的内容**不**使用 task 入队时的快照——到点动态查 store。
         这样用户在 0 点后对日历事件 / 内置分类开关的任何改动都能在 fire 时反映。
@@ -307,15 +286,7 @@ class CalendarPlusPlugin(Star):
             f"→ 合并 {len(system_prompt)} 字"
         )
 
-        # ---- 2. 拉对话历史（从 chat_memory 插件）----
-        contexts = await self._fetch_history_contexts(session)
-        logger.debug(
-            f"{tag()} 🔧 主动消息 contexts: session={session} 拉取 {len(contexts)} 条历史"
-        )
-
-        # ---- 3. 构造本轮 prompt ----
-        # 日历任务到点动态查询当日事件（不依赖 task 入队时的快照，
-        # 这样用户在 0 点后对日历的任何改动都能在 fire 时反映）
+        # ---- 2. 构造本轮 prompt ----
         parts = []
         calendar_added = False
         for t in tasks:
@@ -369,7 +340,7 @@ class CalendarPlusPlugin(Star):
             )
             prompt = f"{prompt}\n\n{late_text}"
 
-        # 多段输出格式提示：让 LLM 用空行分段，发送时按 \n 切成独立消息
+        # 多段输出格式提示：让 LLM 输出空行分段，配合 splitter_w 等装饰器切段
         prompt = f"{prompt}\n\n（如需分多段表达，用空行分隔，每段将作为独立消息发出）"
 
         # debug：打印最终 prompt（完整内容）
@@ -377,14 +348,12 @@ class CalendarPlusPlugin(Star):
             f"{tag()} 🔧 主动消息 prompt 最终({len(prompt)} 字):\n{prompt}"
         )
 
-        # ---- 4. 调 LLM ----
+        # ---- 3. 调 LLM ----
         try:
             llm_kwargs = {
                 "prompt": prompt,
                 "system_prompt": system_prompt,
             }
-            if contexts:
-                llm_kwargs["contexts"] = contexts
             # AstrBot 4.25+ 把 chat_provider_id 改成必填：配置了就用配置，否则回会话默认 provider
             provider_id = (self.config.get("reminder", {}).get("reminder_provider_id") or "").strip()
             if not provider_id:
@@ -398,8 +367,7 @@ class CalendarPlusPlugin(Star):
             llm_kwargs["chat_provider_id"] = provider_id
             logger.debug(
                 f"{tag()} 🔧 主动消息 调 LLM: session={session} provider={provider_id} "
-                f"system={len(system_prompt)}字 prompt={len(prompt)}字 "
-                f"contexts={'是' if contexts else '否'}({len(contexts)}条)"
+                f"system={len(system_prompt)}字 prompt={len(prompt)}字"
             )
             llm_response = await self.context.llm_generate(**llm_kwargs)
             if not llm_response or llm_response.role != "assistant":
@@ -420,108 +388,98 @@ class CalendarPlusPlugin(Star):
                         at_uid = t.target_user_id
                         break
 
-            # 按空行切段发送（首段带 At），跳过空段；段间随机延迟 0.5-2s 模拟打字
-            segments = [s.strip() for s in reply.split("\n") if s.strip()]
-            for i, seg in enumerate(segments):
-                await self.context.send_message(
-                    session, _build_chain(seg, at_uid if i == 0 else "")
-                )
-                if i < len(segments) - 1:
-                    await asyncio.sleep(random.uniform(0.5, 2.0))
+            # 构造初始 components：[At?] + [Plain(reply)]
+            from astrbot.core.message.components import At, Plain
+            components = []
+            if at_uid:
+                components.append(At(qq=at_uid))
+            components.append(Plain(reply))
+
+            # 走 OnDecoratingResultEvent 装饰链：splitter_w 等可能自己发前 N-1 段，留最后一段
+            try:
+                processed = await self._trigger_decorating_hooks(session, components)
+            except Exception as e:
+                logger.warning(f"{tag()} ⚠️ 装饰链整体异常，回退直发: {e}")
+                processed = components
+
+            if processed:
+                await self.context.send_message(session, MessageChain(chain=processed))
+
             logger.info(
                 f"{tag()} ✅ LLM 触发已发: session={session} tasks={len(tasks)} "
-                f"late={is_late} history={len(contexts)} at={at_uid or '-'} "
-                f"segments={len(segments)} provider={provider_id or 'main'}"
+                f"late={is_late} at={at_uid or '-'} "
+                f"provider={provider_id or 'main'}"
             )
         except Exception as e:
             logger.error(f"{tag()} ❌ LLM 触发失败 session={session}: {e}")
 
-    async def _fetch_history_contexts(self, session: str) -> list:
-        """从 chat_memory 插件拉取该会话最近 N 轮对话历史，作为 llm_generate 的 contexts。
+    async def _trigger_decorating_hooks(self, session: str, components: list) -> list:
+        """手动遍历 OnDecoratingResultEvent handler，让 splitter_w / attool / wakepro 等
+        装饰器改写主动消息结果链。仿 astrbot_plugin_proactive_chat/core/message_sender.py:162-257。
 
-        - 不传 user_id（拿群聊整群的混合历史，群聊场景下整群共享一个 cid）
-        - 每条历史在 content 前加 ``[YYYY-MM-DD HH:MM]`` 时间戳前缀，让 LLM 能感知
-          对话发生时间（token 开销很小，但有利于「好久不见」之类的自然语气）
-        - chat_memory 未安装 / 拉取失败 → 返回空 list，主流程降级为不带历史
+        装饰器契约（splitter_w）：装饰器内部可能自己用 ``context.send_message`` 发送前 N-1 段，
+        把最后一段留在 ``result.chain`` 里给外层发。所以本方法返回的是"剩下要发"的 chain。
+
+        任何装饰器失败都不影响其他装饰器；解析/构造异常时返回原 components 让外层兜底直发。
         """
-        reminder_cfg = self.config.get("reminder", {})
-        if not reminder_cfg.get("include_history", True):
-            return []
+        parts = session.split(":")
+        if len(parts) < 3:
+            return list(components)
+        platform_name, msg_type_str, target_id = parts[0], parts[1], parts[2]
 
-        try:
-            rounds = int(reminder_cfg.get("history_rounds", 10) or 10)
-        except (TypeError, ValueError):
-            rounds = 10
-        rounds = max(1, min(50, rounds))
-        limit = rounds * 2  # 每轮 = user + assistant
+        platform_inst = next(
+            (p for p in self.context.platform_manager.platform_insts
+             if p.meta().id == platform_name), None
+        ) or next(
+            (p for p in self.context.platform_manager.platform_insts
+             if p.meta().name == platform_name), None
+        )
+        if not platform_inst:
+            return list(components)
 
-        # 拿当前 conversation_id
-        try:
-            cid = await self.context.conversation_manager.get_curr_conversation_id(session)
-        except Exception as e:
-            logger.warning(
-                f"{tag()} ⚠️ 获取 conversation_id 失败 session={session}: {e}"
-            )
-            return []
-        if not cid:
-            logger.debug(f"{tag()} 无 conversation_id，跳过历史拉取 session={session}")
-            return []
+        message_obj = AstrBotMessage()
+        if "Group" in msg_type_str:
+            message_obj.type = MessageType.GROUP_MESSAGE
+            message_obj.group = Group(group_id=target_id)
+        else:
+            message_obj.type = MessageType.FRIEND_MESSAGE
+        message_obj.session_id = target_id
+        message_obj.message = list(components)
+        message_obj.self_id = "bot"
+        message_obj.sender = MessageMember(user_id=target_id)
+        message_obj.message_str = ""
+        message_obj.raw_message = None
+        message_obj.message_id = ""
 
-        cm = self._resolve_chat_memory()
-        if cm is None:
-            logger.debug(f"{tag()} chat_memory 未安装，跳过历史拉取")
-            return []
+        event = AstrMessageEvent(
+            message_str="",
+            message_obj=message_obj,
+            platform_meta=platform_inst.meta(),
+            session_id=target_id,
+        )
+        res = MessageEventResult()
+        res.chain = list(components)
+        event.set_result(res)
 
-        try:
-            records = await cm.query_history(session, cid, None, limit)
-        except Exception as e:
-            logger.warning(
-                f"{tag()} ⚠️ 从 chat_memory 拉取历史失败 session={session}: {e}"
-            )
-            return []
+        logger.debug(
+            f"{tag()} 🎭 跑装饰链: session={session} umo={event.unified_msg_origin} "
+            f"handlers={len(star_handlers_registry.get_handlers_by_event_type(EventType.OnDecoratingResultEvent))}"
+        )
+        handlers = star_handlers_registry.get_handlers_by_event_type(
+            EventType.OnDecoratingResultEvent
+        )
+        for handler in handlers:
+            try:
+                await handler.handler(event)
+            except Exception as e:
+                logger.warning(
+                    f"{tag()} ⚠️ 装饰钩子执行失败 {handler.handler_full_name}: {e}"
+                )
 
-        contexts = []
-        for r in records:
-            role = r.get("role")
-            content = r.get("content") or ""
-            if not role or not content:
-                continue
-            # 截取前 16 字符 "YYYY-MM-DD HH:MM"（CM 存的可能是完整 datetime 字符串）
-            # 用 <time> XML 标签包裹而非方括号前缀，避免 LLM 把时间戳当成正文格式模仿
-            created = str(r.get("created_at", ""))[:16].strip()
-            if created:
-                contexts.append({"role": role, "content": f"<time>{created}</time> {content}"})
-            else:
-                contexts.append({"role": role, "content": content})
-        return contexts
-
-    def _resolve_chat_memory(self):
-        """定位 chat_memory 插件实例。AstrBot 注册表 → sys.modules fallback。
-
-        成功后缓存到 ``self._chat_memory``；失败不缓存以便下次重试。
-        """
-        if self._chat_memory is not None:
-            return self._chat_memory
-        try:
-            star = self.context.get_registered_star("chat_memory")
-            if star is not None:
-                # 不同 AstrBot 版本包装层级可能不同，依次尝试
-                for candidate in (
-                    star,
-                    getattr(star, "star", None),
-                    getattr(star, "star_cls", None),
-                ):
-                    if candidate is not None and hasattr(candidate, "query_history"):
-                        self._chat_memory = candidate
-                        return candidate
-        except Exception:
-            pass
-        import sys
-        mod = sys.modules.get("chat_memory.main") or sys.modules.get("chat_memory")
-        if mod is not None and hasattr(mod, "query_history"):
-            self._chat_memory = mod
-            return mod
-        return None
+        final_res = event.get_result()
+        if final_res and final_res.chain is not None:
+            return list(final_res.chain)
+        return []
 
     # ==================== 每日日历扫描 ====================
 
@@ -596,16 +554,15 @@ class CalendarPlusPlugin(Star):
         return custom
 
     def _resolve_calendar_today(self) -> str:
-        """{calendar_today} 的取值：当日事项按 separator 拼接，无事项返回 empty_text。"""
+        """{calendar_today} 的取值：当日事项按「、」拼接，无事项返回 empty_text。"""
         cal = self.config.get("calendar", {})
         if not cal.get("enable_calendar", False):
             return cal.get("calendar_empty_text", "") or ""
         now = get_now(self.config, self._astrbot_config())
-        separator = cal.get("calendar_separator", "、")
         empty_text = cal.get("calendar_empty_text", "") or ""
         include_builtin = cal.get("enable_builtin_events", True) and bool(self._enabled_builtin_categories())
         return calendar_store.today_text(
-            now, separator=separator, empty_text=empty_text, include_builtin=include_builtin
+            now, empty_text=empty_text, include_builtin=include_builtin
         )
 
     # ==================== 内置日历事件 ====================
@@ -648,8 +605,14 @@ class CalendarPlusPlugin(Star):
         now = get_now(self.config, self._astrbot_config())
         slot = find_active_schedule_slot(ds, now)
         if slot is None:
+            logger.debug(f"{tag()} 日程表未命中任何时段（now={now.strftime('%H:%M')}）")
             return "未指定（按人设自然推断）"
+        name = (slot.get("name") or "").strip()
         state = (slot.get("state_prompt") or "").strip()
+        logger.debug(
+            f"{tag()} 日程表命中时段：name={name or '(无名)'} "
+            f"{slot.get('start_time')}-{slot.get('end_time')} state_prompt={len(state)}字"
+        )
         return state or "未指定（按人设自然推断）"
 
     def _resolve_placeholders(self, text: str) -> str:
@@ -735,35 +698,12 @@ class CalendarPlusPlugin(Star):
 
     @filter.on_llm_request()
     async def inject_time_context(self, event: AstrMessageEvent, req: ProviderRequest):
-        """时间引导 prompt（含 {daily_schedule_state} 占位符）→ system_prompt 末尾。
-
-        sleep_prompt 已废弃：睡眠时段的 state_prompt 现在通过 {daily_schedule_state}
-        占位符统一走 system_prompt（与日程表机制一致）。
-        """
+        """时间引导 prompt（含 {calendar_today} / {daily_schedule_state} 占位符）→ system_prompt 末尾。"""
         try:
             guidance = self._resolve_placeholders(self._effective_time_guidance_prompt())
             self._append_system_prompt(req, guidance)
         except Exception as e:
             logger.error(f"{tag(event)} ❌ on_llm_request 注入失败: {e}")
-
-    @filter.on_llm_response()
-    async def strip_time_tags_from_response(
-        self,
-        event: AstrMessageEvent,
-        response: LLMResponse,
-    ) -> None:
-        """剥掉 LLM 回复中误模仿的 <time>...</time> 标签。
-
-        历史对话中我们用 <time> 包裹时间戳注入，部分 LLM 会模仿该格式输出；
-        此钩子在回复落盘前清洗，确保用户看到的是干净正文。
-        """
-        text = response.completion_text or ""
-        if not text or "<time" not in text.lower():
-            return
-        cleaned = _TIME_TAG_PATTERN.sub("", text)
-        if cleaned != text:
-            response.completion_text = cleaned
-            logger.debug(f"{tag(event)} 🧹 已剥离 <time> 标签")
 
     # ==================== 命令树 ====================
 
@@ -1190,50 +1130,61 @@ class CalendarPlusPlugin(Star):
 
         lines = [f"[日程表 共 {len(ordered)} 条时段（感知{'已启用' if enabled else '未启用'}）]"]
         for s in ordered:
+            name = (s.get("name") or "").strip()
             start = str(s.get("start_time", "")).strip()
             end = str(s.get("end_time", "")).strip()
             state = (s.get("state_prompt") or "").strip() or "(无状态描述)"
             # state 截断到 40 字，过长用省略号
             state_preview = state if len(state) <= 40 else state[:37] + "..."
+            name_tag = f"[{name}] " if name else ""
             marker = " ← 当前" if start == active_start else ""
-            lines.append(f"  {start}-{end}{marker}  {state_preview}")
+            lines.append(f"  {start}-{end}{marker}  {name_tag}{state_preview}")
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @schedule_group.command("create")
     async def schedule_create(self, event: AstrMessageEvent, confirm: str = ""):
-        """按配置里的世界观或当前人设生成日程表（覆盖现有 schedule_templates）。
+        """按配置生成日程表（覆盖现有 schedule_templates）。
 
-        优先级：
-        1. 配置 daily_schedule.ai_generate_worldview 非空 → 用之
-        2. 当前会话的人设 prompt 非空 → 用之作为世界观输入
-        3. 都为空 → 拒绝执行
-
-        已有现有时段时需显式追加 ``confirm`` 参数确认覆盖。
+        输入源由配置 ``ai_generate_use_persona`` 控制：
+        - True（默认）：「当前会话人设 prompt」+ ``ai_generate_worldview`` 拼接为联合输入
+        - False：仅读 ``ai_generate_worldview``
+        两者都为空时拒绝执行。已有现有时段时需追加 ``confirm`` 参数确认覆盖。
         """
         ds = self.config.get("daily_schedule", {})
-        theme = (ds.get("ai_generate_worldview", "") or "").strip()
+        use_persona = bool(ds.get("ai_generate_use_persona", True))
+        worldview = (ds.get("ai_generate_worldview", "") or "").strip()
 
-        # 人设兜底
-        persona_used = False
-        if not theme:
+        persona_prompt = ""
+        if use_persona:
             session = event.unified_msg_origin or ""
             try:
                 persona = await self.context.persona_manager.get_default_persona_v3(session)
-                persona_prompt = (persona or {}).get("prompt") or ""
+                persona_prompt = ((persona or {}).get("prompt") or "").strip()
             except Exception as e:
                 logger.warning(f"{tag()} ⚠️ 获取人设失败 session={session}: {e}")
                 persona_prompt = ""
-            if persona_prompt.strip():
-                theme = persona_prompt.strip()
-                persona_used = True
+
+        # 拼接联合输入：人设 + 世界观
+        parts = []
+        if persona_prompt:
+            parts.append(persona_prompt)
+        if worldview:
+            parts.append(worldview)
+        theme = "\n\n".join(parts) if parts else ""
+        persona_used = bool(persona_prompt)
 
         if not theme:
-            yield event.plain_result(
-                "未配置世界观，且当前会话没有人设 prompt。\n"
-                "请先在配置 daily_schedule.ai_generate_worldview 填写主题，"
-                "或为当前会话配置人设后重试。"
-            )
+            if use_persona:
+                yield event.plain_result(
+                    "未提供任何输入：当前会话没有人设 prompt，且 daily_schedule.ai_generate_worldview 为空。\n"
+                    "请为人设配置 prompt，或在配置里填写世界观设定后重试。"
+                )
+            else:
+                yield event.plain_result(
+                    "未配置世界观（daily_schedule.ai_generate_worldview 为空）。\n"
+                    "请填写世界观后重试，或勾选「人设 + 世界观联合输入」开关。"
+                )
             return
 
         # 二次确认（覆盖现有 schedule_templates）
@@ -1245,17 +1196,22 @@ class CalendarPlusPlugin(Star):
             )
             return
 
-        async for msg in self._do_schedule_generate(event, theme, persona_used):
+        async for msg in self._do_schedule_generate(event, theme, persona_used, worldview_used=bool(worldview)):
             yield msg
 
     async def _do_schedule_generate(
-        self, event: AstrMessageEvent, theme: str, persona_used: bool
+        self, event: AstrMessageEvent, theme: str, persona_used: bool, worldview_used: bool = False
     ):
         """实际执行 LLM 调用 + 解析 + 落盘。"""
         ds = self.config.get("daily_schedule", {})
         provider_id = (ds.get("ai_generate_provider_id", "") or "").strip()
 
-        source_tag = "当前人设" if persona_used else "配置世界观"
+        if persona_used and worldview_used:
+            source_tag = "人设 + 世界观"
+        elif persona_used:
+            source_tag = "当前人设"
+        else:
+            source_tag = "配置世界观"
         theme_preview = theme if len(theme) <= 60 else theme[:57] + "..."
         yield event.plain_result(
             f"正在调用 AI 生成日程表（来源：{source_tag}「{theme_preview}」），请稍候……"
@@ -1295,6 +1251,7 @@ class CalendarPlusPlugin(Star):
         for item in slots_data:
             slot = {
                 "__template_key": "time_slot",
+                "name": item.get("name", ""),
                 "start_time": item["start"],
                 "end_time": item["end"],
                 "state_prompt": item["state"],
@@ -1317,9 +1274,11 @@ class CalendarPlusPlugin(Star):
         active = find_active_schedule_slot(self.config.get("daily_schedule", {}), now)
         active_info = ""
         if active:
+            active_name = (active.get("name") or "").strip()
             active_state = (active.get("state_prompt") or "").strip()
+            name_part = f"[{active_name}] " if active_name else ""
             active_info = (
-                f"\n当前命中时段：{active.get('start_time')}-{active.get('end_time')}"
+                f"\n当前命中时段：{name_part}{active.get('start_time')}-{active.get('end_time')}"
                 + (f"（{active_state[:40]}）" if active_state else "")
             )
 
@@ -1368,6 +1327,7 @@ class CalendarPlusPlugin(Star):
         for item in data:
             if not isinstance(item, dict):
                 continue
+            name = str(item.get("name", "")).strip()
             start = str(item.get("start", "")).strip()
             end = str(item.get("end", "")).strip()
             state = str(item.get("state", "")).strip()
@@ -1386,7 +1346,7 @@ class CalendarPlusPlugin(Star):
                     break
             if not valid:
                 continue
-            result.append({"start": start, "end": end, "state": state})
+            result.append({"name": name, "start": start, "end": end, "state": state})
 
         return result if result else None
 
@@ -1397,29 +1357,24 @@ class CalendarPlusPlugin(Star):
         self,
         event: AstrMessageEvent,
         delay_minutes: int,
-        hint: str = "",
+        hint: str,
     ) -> str:
         """
-        当以下任一情况发生时调用此工具：
+        安排一个未来时刻的主动消息：到点时插件会重新唤醒你（带完整人设/历史/当前时间/日程状态），
+        你会看到 hint 作为备忘，然后生成一条符合人设的主动消息发给用户。
 
-        1. 你对当前对话承诺「X 分钟后再继续/再说某事」（用户明确要求提醒、晚点再聊）。
-        2. 用户请你执行耗时的现实任务（如买水、跑腿、查资料、做饭），但你作为虚拟人格
-           无法实际执行——可模拟「已去执行」的过程：估算合理耗时后调用此工具，
-           到点时插件重新唤醒你，由你以「任务已完成」的口吻继续对话，让体验更拟人。
+        触发场景：
+        - 用户明确要求「X 分钟后提醒我」「晚点再聊」等
+        - 你和用户约定了稍后继续某事（如「等我下」「一会儿告诉你」）
 
-        约束：仅在用户**明确**请求执行现实任务、或**明确**要求稍后提醒时调用；
-        闲聊、已完成的事、用户没请你做的事不要触发，避免滥用。
-
-        到点时插件会带完整人设/历史/状态重新唤醒你，由你看到 hint 文本，生成符合人设的回复。
+        不要触发的场景：
+        - 用户没明确要求时主动定时（避免打扰）
+        - 已完成的事或闲聊中无事可约
 
         Args:
-            delay_minutes(int): 几分钟后触发（范围 1-1440，即最多 24 小时）。
-                场景 1：用户指定的时间。
-                场景 2：你估算的现实任务合理耗时（买水约 5 分钟、跑腿约 30 分钟、电影约 2 小时）。
-            hint(string): 到点时你会看到这条文本作为备忘，要写得让「未来的你」能延续当时状态。
-                场景 1 必填：承诺了什么、要继续什么。
-                场景 2 必填：模拟执行了什么任务、到点该以什么口吻汇报
-                （如「假装去买了水，告诉用户水买回来了，可附上虚构的细节」）。
+            delay_minutes(int): 几分钟后触发。范围 1-1440（最多 24 小时）。
+            hint(string): 给「未来的自己」的备忘。必填。要写得让未来的你能延续此刻状态——
+                约定了什么、要继续什么、以什么口吻回应。
         """
         reminder_cfg = self.config.get("reminder", {})
         if not reminder_cfg.get("enable_reminder", False):
@@ -1454,13 +1409,7 @@ class CalendarPlusPlugin(Star):
         time_str = fire_at.strftime('%H:%M')
         return (
             f"已安排 {delay} 分钟后（{time_str}）触发主动消息{hint_preview}。\n"
-            f"\n"
-            f"<REPLY_GUIDE>\n"
-            f"是否回复用户由你判断：\n"
-            f"- 若你刚才已向用户说明过此事（承诺过/确认过），本轮可直接返回空回复，不要重复；\n"
-            f"- 若你刚才未提及此事（如直接调用了工具），请用一两句话简短告知用户已安排。\n"
-            f"仅在确有新信息需要补充时才说话。返回空回复是允许的。\n"
-            f"</REPLY_GUIDE>"
+            f"本轮无需向用户复述本次工具调用——若刚才已和用户说过安排，直接返回空回复即可；若未说过，简短告知一声即可。"
         )
 
     # ==================== 辅助函数 ====================
@@ -1539,21 +1488,3 @@ class CalendarPlusPlugin(Star):
         except ValueError:
             return None
         return None
-
-
-def _build_chain(text: str, at_uid: str = ""):
-    """构造 MessageChain，用于 context.send_message。
-
-    ``at_uid`` 非空时前置 At 组件（仅群聊 followup 场景）。
-    渲染规则参照 attool：At 后跟零宽空格 + 空格，避免与后续文本粘连；
-    不在系统里调 attool 插件——主动消息走 ``context.send_message`` 不经 hook 链。
-    """
-    from astrbot.api.event import MessageChain
-    from astrbot.core.message.components import At, Plain
-
-    chain = MessageChain()
-    if at_uid:
-        chain.chain = [At(qq=at_uid), Plain("​ ​" + text)]
-    else:
-        chain.chain = [Plain(text)]
-    return chain

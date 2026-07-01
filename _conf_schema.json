@@ -10,10 +10,10 @@
                 "hint": "启用后，将固定时间使用指南追加到 system_prompt 末尾，指导 AI 正确处理时间相关表述"
             },
             "time_guidance_prompt": {
-                "description": "📝 时间感知增强提示词",
+                "description": "📝 时间感知增强提示词(system_prompt)",
                 "type": "text",
-                "default": "<TIME_GUIDE>\n时间感知规则（必须严格遵守）：\n1. 真实性：下方\"当日事项\"是今日事件、节日、纪念日的唯一可信来源；其他时间细节也禁止编造或推测。\n2. 自然回应：优先使用自然口语（如\"刚才\"、\"大半夜\"、\"好久不见\"）替代数字报时，仅在用户明确询问时提供精确时间。\n3. 状态映射：参考下方\"当前时段状态\"自然带入人设（不刻意强调数字）。\n4. 上下文感知：参考对话历史的时间分布调整语气（多条消息间隔较长可表露想念，刚聊过则保持连贯）；睡眠时段被叫醒时按人设自然表现困意。\n\n当前时段状态：{daily_schedule_state}\n当日事项：{calendar_today}\n</TIME_GUIDE>",
-                "hint": "追加到 system_prompt 末尾的固定时间指南。支持占位符：{calendar_today}（开启日历功能后替换为当日事项）、{daily_schedule_state}（开启日程表后替换为当前命中时段的状态描述）。可用 \\n 换行"
+                "default": "<TIME_GUIDE>\n时间感知规则（必须严格遵守）：\n1. 真实性：下方\"当日事项\"是今日事件、节日、纪念日的唯一可信来源；其他时间细节也禁止编造或推测。\n2. 自然回应：优先使用自然口语（如\"刚才\"、\"大半夜\"、\"好久不见\"）替代数字报时，仅在用户明确询问时提供精确时间。\n3. 状态映射：参考下方\"当前时段状态\"自然带入人设（不刻意强调数字）。状态值为「未指定」时按人设与时段常识自由演绎即可。\n4. 上下文感知：参考对话历史的时间分布调整语气（多条消息间隔较长可表露想念，刚聊过则保持连贯）；睡眠时段被叫醒时按人设自然表现困意。\n\n当前时段状态：{daily_schedule_state}\n当日事项：{calendar_today}\n</TIME_GUIDE>",
+                "hint": "追加到 system_prompt 末尾的固定时间指南。支持占位符：{calendar_today}、{daily_schedule_state}"
             },
             "use_astrbot_timezone": {
                 "description": "🌐 跟随 AstrBot 时区",
@@ -32,7 +32,7 @@
     "daily_schedule": {
         "description": "🗓️ 单日日程表（时段状态感知）",
         "type": "object",
-        "hint": "按时间段定义角色状态（晨起/元气/入夜/睡眠...），命中时段的描述通过 {daily_schedule_state} 占位符注入到时间感知 prompt。睡眠窗口视为一个普通时段，与清醒段统一管理。",
+        "hint": "按时间段定义角色状态（晨起/元气/入夜/睡眠...），命中时段的描述通过 {daily_schedule_state} 占位符注入到时间感知 prompt。",
         "items": {
             "enable_schedule": {
                 "description": "✅ 启用日程表感知",
@@ -45,53 +45,89 @@
                 "type": "template_list",
                 "templates": {
                     "time_slot": {
-                        "name": "时段",
-                        "hint": "一天中的一个时段，含开始/结束时间和状态描述",
+                        "name": "⏰ 时段",
+                        "hint": "一天中的一个时段，含名称/时间/状态描述",
                         "items": {
+                            "name": {
+                                "description": "🏷️ 名称",
+                                "type": "string",
+                                "default": "",
+                                "hint": "该时段的标签（如「晨起」「午休」「深夜」），仅用于 webui 列表展示与日志，不影响 prompt 注入"
+                            },
                             "start_time": {
-                                "description": "开始时间（HH:MM）",
+                                "description": "▶️ 开始时间（HH:MM）",
                                 "type": "string",
                                 "default": "00:00",
                                 "hint": "24 小时制 HH:MM。若 end_time < start_time 视为跨午夜（如 22:00→08:00）"
                             },
                             "end_time": {
-                                "description": "结束时间（HH:MM）",
+                                "description": "⏹️ 结束时间（HH:MM）",
                                 "type": "string",
                                 "default": "06:00",
                                 "hint": "exclusive：当前时间 < end_time 才算命中，连续时段边界不会双命中。跨午夜时段 end_time 是次日时刻"
                             },
                             "state_prompt": {
-                                "description": "状态描述（注入 prompt）",
+                                "description": "💬 状态描述({daily_schedule_state})",
                                 "type": "text",
                                 "default": "",
-                                "hint": "命中此时段时注入到 {daily_schedule_state} 的文本。建议 50-200 字，描述角色的生理/情绪/语气状态，不改写人设核心。睡眠段可用 <SLEEP_MODE>...</SLEEP_MODE> 包裹"
+                                "hint": "命中此时段时注入到 {daily_schedule_state} 的文本。建议 50-200 字，描述角色的生理/情绪/语气状态，不改写人设核心。可使用XML例如 <SLEEP_MODE>...</SLEEP_MODE>"
+                            }
+                        }
+                    },
+                    "sleep_slot": {
+                        "name": "🌙 睡眠时段（预设）",
+                        "hint": "预填默认睡眠窗口（22:00→08:00 跨午夜）与默认睡眠状态提示词。添加后可按需调整时间或提示词",
+                        "items": {
+                            "name": {
+                                "description": "🏷️ 名称",
+                                "type": "string",
+                                "default": "睡眠",
+                                "hint": "该时段的标签，仅用于 webui 列表展示与日志"
+                            },
+                            "start_time": {
+                                "description": "▶️ 开始时间（HH:MM）",
+                                "type": "string",
+                                "default": "22:00",
+                                "hint": "24 小时制 HH:MM。若 end_time < start_time 视为跨午夜（如 22:00→08:00）"
+                            },
+                            "end_time": {
+                                "description": "⏹️ 结束时间（HH:MM）",
+                                "type": "string",
+                                "default": "08:00",
+                                "hint": "exclusive：当前时间 < end_time 才算命中，连续时段边界不会双命中。跨午夜时段 end_time 是次日时刻"
+                            },
+                            "state_prompt": {
+                                "description": "💬 状态描述({daily_schedule_state})",
+                                "type": "text",
+                                "default": "<SLEEP_MODE>\n当前是睡眠时段，你刚被消息叫醒或正在半梦半醒之间。请按人设自然回应——可带困意、含糊、迟疑、不情愿，但不要拒对不起对话；允许偶尔走神、把话说半句、打哈欠。\n</SLEEP_MODE>",
+                                "hint": "命中此时段时注入到 {daily_schedule_state} 的文本。建议 50-200 字，描述角色的生理/情绪/语气状态，不改写人设核心。可使用XML例如 <SLEEP_MODE>...</SLEEP_MODE>"
                             }
                         }
                     }
                 },
                 "default": [],
-                "hint": "时段列表。点击「添加项」选「时段」模板创建。时段可任意顺序，启动时按 start_time 排序后检测重叠（重叠仅警告，不强制 reject）。未覆盖的时段返回「未指定」。支持跨午夜（end < start 自动识别）"
+                "hint": "时段列表。任意顺序，启动时按 start_time 排序后检测重叠（重叠仅警告）。支持跨午夜（end < start 自动识别）"
             },
             "ai_generate_provider_id": {
-                "description": "🤖 AI 生成日程表使用的模型（留空跟随主模型）",
+                "description": "🤖 AI 生成日程表使用的模型(provider_id)",
                 "type": "string",
                 "default": "",
                 "_special": "select_provider",
                 "hint": "指定 /schedule create 命令所用的模型提供商。留空则使用当前主模型"
             },
+            "ai_generate_use_persona": {
+                "description": "🧑 人设 + 世界观联合输入",
+                "type": "bool",
+                "default": true,
+                "hint": "启用后 /schedule create 会把「当前会话人设 prompt」与下方「世界观设定」拼接为联合输入（推荐：人设给性格底色，世界观给题材氛围）；关闭则只用世界观字段。两者都为空时拒绝执行"
+            },
             "ai_generate_worldview": {
-                "description": "🌍 默认世界观设定（可空）",
+                "description": "🌍 世界观设定",
                 "type": "text",
                 "default": "",
-                "hint": "/schedule create 命令使用的世界观/主题设定（如「末世废土」「蒸汽朋克都市」）。留空时命令自动读取当前会话的人设 prompt 作为输入；人设也为空则拒绝执行"
+                "hint": "/schedule create 命令使用的世界观/主题设定（如「末世废土」「蒸汽朋克都市」）。上方「人设 + 世界观联合输入」启用时与人设拼接；关闭时单独使用。两者都为空时拒绝执行"
             }
         }
-    },
-    "config_version": {
-        "description": "配置版本号（自动管理）",
-        "type": "int",
-        "default": 0,
-        "hint": "⚠️ 自动管理字段，请勿手动修改。插件启动时按版本号链式迁移旧配置（如老 sleep_* 字段会自动转入 daily_schedule）"
     },
     "calendar": {
         "description": "📅 时间表（日历事项）设置",
@@ -101,13 +137,7 @@
                 "description": "✅ 启用时间表功能",
                 "type": "bool",
                 "default": false,
-                "hint": "启用后，{calendar_today} 占位符会解析为当天的时间表事项（可用于时间感知提示词与睡眠提示）。关闭时占位符返回 calendar_empty_text"
-            },
-            "calendar_separator": {
-                "description": "➡️ 事项分隔符",
-                "type": "string",
-                "default": "、",
-                "hint": "当天有多条事项时，{calendar_today} 使用此分隔符拼接。例如「、」或「，」"
+                "hint": "启用后，{calendar_today} 占位符会解析为当天的时间表事项（可用于时间感知提示词与睡眠提示）。关闭时占位符返回「无事项时的默认文本」配置的值"
             },
             "calendar_empty_text": {
                 "description": "📭 无事项时的默认文本",
@@ -116,7 +146,7 @@
                 "hint": "当天没有任何事项时，{calendar_today} 返回的文本。默认「无」让 LLM 明确知道今日无特殊事件；可改为空字符串或自定义文本"
             },
             "ai_generate_provider_id": {
-                "description": "🤖 AI 生成时间表使用的模型（留空跟随主模型）",
+                "description": "🤖 AI 生成时间表使用的模型(provider_id)",
                 "type": "string",
                 "default": "",
                 "_special": "select_provider",
@@ -126,13 +156,13 @@
                 "description": "🌍 默认世界观设定（可空）",
                 "type": "text",
                 "default": "",
-                "hint": "/calendar create 命令使用的世界观/主题设定（如「末世废土」「蒸汽朋克都市」）。命令本身不带参数，每次调用都会使用此处的设定重新生成完整日历。留空时命令会拒绝执行。系统提示词由插件内置，无需用户配置"
+                "hint": "/calendar create 命令使用的世界观/主题设定（如「末世废土」「蒸汽朋克都市」）。每次调用都会使用此处的设定重新生成完整日历"
             },
             "enable_builtin_events": {
                 "description": "✅ 启用内置现实日历事件",
                 "type": "bool",
                 "default": true,
-                "hint": "启用后插件自动生成常用的现实日历事件（节日/节气），与用户自定义事件合并显示在 {calendar_today} 中。事件存于 builtin_events.yaml，每年自动重新生成"
+                "hint": "启用后自动导入常用的现实日历事件（节日/节气）。事件存于 builtin_events.yaml，每年自动重新生成"
             },
             "builtin_events": {
                 "description": "📅 内置事件分类开关",
@@ -186,10 +216,10 @@
                 "description": "✅ 启用主动提醒",
                 "type": "bool",
                 "default": false,
-                "hint": "启用后启动后台调度循环：当日全部日历事件（内置节日/节气 + 用户自定义事件）在指定时刻合并主动发送到白名单会话；LLM 也可通过 schedule_followup 工具自行安排后续主动消息"
+                "hint": "启用后启动后台调度循环：当日全部日历事件在指定时刻合并主动发送到白名单会话；LLM 也可通过 schedule_followup 工具自行安排后续主动消息"
             },
             "reminder_targets": {
-                "description": "📋 提醒目标会话白名单",
+                "description": "📋 提醒目标会话白名单(UMO)",
                 "type": "list",
                 "default": [],
                 "hint": "每行一个完整 UMO 字符串（如 aiocqhttp:GroupMessage:123456789 或 aiocqhttp:FriendMessage:987654321）。仅这些会话会收到主动提醒；LLM 在非白名单会话调用 schedule_followup 会被拒绝"
@@ -198,7 +228,7 @@
                 "description": "⏰ 当日日历事件发送时刻",
                 "type": "string",
                 "default": "09:00",
-                "hint": "格式 HH:MM（24 小时制）。每日 0 点扫描当日全部日历事件（内置节日/节气 + 用户自定义事件），在此时刻合并发到白名单会话"
+                "hint": "格式 HH:MM（24 小时制）。每日 0 点扫描当日全部日历事件，在此时刻合并发到白名单会话"
             },
             "reminder_max_late_minutes": {
                 "description": "⏳ 迟到容忍窗口（分钟）",
@@ -216,22 +246,10 @@
                 "description": "🛠️ 向 LLM 注册 schedule_followup 工具",
                 "type": "bool",
                 "default": true,
-                "hint": "启用后 LLM 可在承诺\"X 分钟后再说\"时主动调用工具安排后续主动消息。关闭则 LLM 看不到此工具"
-            },
-            "include_history": {
-                "description": "💬 主动提醒携带对话历史",
-                "type": "bool",
-                "default": true,
-                "hint": "启用后，主动提醒调 LLM 时会从 chat_memory 插件拉取该会话最近的对话作为 contexts 传入（需要安装 chat_memory 插件；拉不到时降级为不带历史）"
-            },
-            "history_rounds": {
-                "description": "🔁 对话历史轮数",
-                "type": "int",
-                "default": 10,
-                "hint": "从 chat_memory 拉取的对话轮数（每轮 = 1 条用户消息 + 1 条 AI 回复 = 2 条记录）。范围 1-50"
+                "hint": "启用后 LLM 可在承诺\"X 分钟后再说\"时主动调用工具安排后续主动消息。关闭则 LLM 看不到此工具。注意：工具调用时目标会话必须在「提醒目标会话白名单」内，否则会被拒绝执行"
             },
             "reminder_provider_id": {
-                "description": "🤖 主动提醒使用的模型（留空跟随主模型）",
+                "description": "🤖 主动提醒使用的模型(provider_id)",
                 "type": "string",
                 "default": "",
                 "_special": "select_provider",
@@ -253,7 +271,7 @@
                 "description": "🤖 日志区分机器人实例",
                 "type": "bool",
                 "default": false,
-                "hint": "启用后，能拿到消息事件的日志（如 on_llm_request 注入失败）前缀从 [time_awareness] 变为 [time_awareness:platform_id]，便于多 Bot 实例环境下定位问题。后台调度、启动初始化等无事件上下文的日志不受影响"
+                "hint": "启用后，消息事件相关日志的前缀从 [time_awareness] 变为 [time_awareness:platform_id]，便于多 Bot 实例环境下定位问题"
             }
         }
     }
