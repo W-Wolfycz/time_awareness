@@ -23,7 +23,7 @@ from .log import logger, configure as configure_log, tag
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
-from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
+from astrbot.core.message.message_event_result import MessageChain, MessageEventResult, ResultContentType
 from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
@@ -459,6 +459,9 @@ class CalendarPlusPlugin(Star):
         )
         res = MessageEventResult()
         res.chain = list(components)
+        # 主动消息是 LLM 调用的产物，标为 LLM_RESULT 让 splitter_w 等装饰器按 LLM 回复处理
+        # （split_scope="llm_only" 时 splitter_w 会跳过非 LLM 结果）
+        res.set_result_content_type(ResultContentType.LLM_RESULT)
         event.set_result(res)
 
         logger.debug(
