@@ -70,6 +70,7 @@ def _ok(**data):
 
 
 def _err(msg: str, status: int = 400):
+    logger.warning(f"{tag()} ⚠️ Web API 返回 {status}: {msg}")
     return jsonify({"success": False, "error": msg}), status
 
 
@@ -274,7 +275,9 @@ def register_web_apis(context, plugin) -> None:
             max_fire = now + timedelta(days=365)
             if fire_at <= min_fire:
                 return _err(
-                    f"触发时间必须晚于当前时间至少 1 分钟（当前 {now.isoformat()}）",
+                    f"触发时间距当前过近（弹窗默认时间是打开时算的 +10 分钟，"
+                    f"停留过久会被追上）。当前服务器时间 {now.strftime('%H:%M:%S')}，"
+                    f"请重新选一个至少 1 分钟后的时刻",
                     400,
                 )
             if fire_at > max_fire:

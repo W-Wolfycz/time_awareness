@@ -450,15 +450,18 @@ async function submitCreateTask() {
   if (!fire_at_local) { toast('error', '请填写触发时间'); return; }
   if (!hint) { toast('error', '请填写提醒内容'); return; }
 
-  // 预检：明显过去（用后端 now_iso 粗筛，避免客户端时钟偏差；宁可漏过不误拦）
-  if (state.taskOptions && state.taskOptions.now_iso) {
-    const nowMs = Date.parse(state.taskOptions.now_iso);
-    // naive ISO 用 Date.parse 会被浏览器当本地时间解析；只做粗筛
-    const fireMs = Date.parse(fire_at_local);
-    if (!isNaN(nowMs) && !isNaN(fireMs) && fireMs - nowMs < 60000) {
-      toast('error', '触发时间必须晚于当前时间至少 1 分钟');
-      return;
-    }
+  // 实时预检：用浏览器当前时钟（不依赖 modal 打开时的快照 now_iso，
+  // 否则停留过久会让快照过期，预检漏过、后端 400、bridge 又丢失错误体）
+  // 余量 90s 比后端 60s 严格，确保前端先拦下
+  const fireMs = Date.parse(fire_at_local);
+  const realNowMs = Date.now();
+  if (!isNaN(fireMs) && fireMs - realNowMs < 90000) {
+    toast(
+      'error',
+      '触发时间距当前过近（弹窗默认时间是打开时算的 +10 分钟，停留过久会被追上）。' +
+      `当前浏览器时间 ${new Date(realNowMs).toLocaleTimeString()}，请重新选一个至少 1 分钟后的时刻`
+    );
+    return;
   }
 
   const submitBtn = document.getElementById('tf-submit');
