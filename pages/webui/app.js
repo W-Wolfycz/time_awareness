@@ -512,12 +512,19 @@ function positionChipTooltip(ev) {
   const tip = _chipTooltipEl;
   if (!tip || tip.style.display === 'none') return;
   const padding = 12;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
   // 默认显示在鼠标右上方；右边/上边空间不够则翻到左/下
   const tipRect = tip.getBoundingClientRect();
   let x = ev.clientX + padding;
   let y = ev.clientY - tipRect.height - padding;
-  if (x + tipRect.width > window.innerWidth) x = ev.clientX - tipRect.width - padding;
+  if (x + tipRect.width > vw) x = ev.clientX - tipRect.width - padding;
   if (y < 0) y = ev.clientY + padding;
+  // 翻转后仍可能溢出（chip 极度靠左/右/下）—— clamp 到屏幕内
+  if (x < padding) x = padding;
+  if (x + tipRect.width > vw - padding) x = Math.max(padding, vw - tipRect.width - padding);
+  if (y < padding) y = padding;
+  if (y + tipRect.height > vh - padding) y = Math.max(padding, vh - tipRect.height - padding);
   tip.style.left = `${x}px`;
   tip.style.top = `${y}px`;
 }

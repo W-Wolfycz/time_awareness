@@ -550,15 +550,43 @@ table.data-table {
 
 /* ==================== 响应式 ==================== */
 @media (max-width: 720px) {
-  .app { grid-template-columns: 1fr; }
-  .sidebar {
-    position: fixed;
-    left: -100%;
-    width: var(--sidebar-w);
-    transition: left var(--ease);
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
   }
-  .sidebar.open { left: 0; }
-  .content { padding: 16px; }
+  .sidebar {
+    position: static;
+    width: 100%;
+    height: auto;
+    box-shadow: none;
+    border-bottom: 1px solid var(--border);
+    padding: 0;
+  }
+  .sidebar-header {
+    padding: 10px 14px 8px;
+    border-bottom: none;
+  }
+  .sidebar-title { font-size: 14px; }
+  .sidebar-subtitle { display: none; }
+  .sidebar-nav {
+    flex-direction: row;
+    gap: 4px;
+    padding: 0 8px 8px;
+    overflow-x: auto;
+    overflow-y: visible;
+  }
+  .nav-item {
+    flex: 1;
+    justify-content: center;
+    padding: 8px 10px;
+    font-size: 13px;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .sidebar-footer { display: none; }
+  .content { padding: 14px; }
+  .topbar { padding: 10px 14px; }
+  .topbar-title { font-size: 15px; }
 }
 
 /* ==================== 任务页工具栏 ==================== */
