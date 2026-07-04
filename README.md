@@ -1,11 +1,11 @@
 # time_awareness — 时间感知增强
 
-为 LLM 注入自然时间表达引导、单日时段状态（日程表）、可 AI 生成的世界观日历（`{calendar_today}` / `{daily_schedule_state}` 占位符），以及现实日历事件（法定节假日、传统节日、节气、黄历等）。
+为 LLM 注入自然时间表达引导、单日时段状态（日程表）、可 AI 生成的世界观日历，以及现实日历事件（法定节假日、传统节日、节气、黄历等）。
 
 ## 功能
 
-- **时间引导 prompt**：固定时间规则追加到 `system_prompt` 末尾，引导 LLM 自然表达时间，支持 `{calendar_today}` / `{daily_schedule_state}` 占位符
-- **单日日程表**：按时间段定义角色状态（晨起 / 元气 / 入夜 / 睡眠...），命中时段描述通过 `{daily_schedule_state}` 注入 prompt；睡眠窗口视为一个普通时段统一管理
+- **时间引导 prompt**：静态时间规则追加到 `system_prompt` 末尾（保 Prompt 缓存），当前时段状态与当日事项作为额外内容块注入到当前轮 user 消息末尾（`mark_as_temp` 不持久化到历史）
+- **单日日程表**：按时间段定义角色状态（晨起 / 元气 / 入夜 / 睡眠...），命中时段描述通过动态数据块注入 prompt；睡眠窗口视为一个普通时段统一管理
 - **AI 日历生成**：用户给一个世界观/主题，LLM 一次性生成一整年日历事项
 - **现实日历事件**：法定节假日（含调休）/ 传统农历节日 / 二十四节气 / 政治纪念日 / 国际西方节日 / 黄历（每日干支/宜忌）
 - **主动提醒**：当日事项在指定时刻主动发到白名单会话；LLM 可通过 `schedule_followup` 工具自行安排后续主动消息；WebUI 可手动添加一次性任务
@@ -23,16 +23,17 @@
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `time_guidance_enabled` | 启用时间引导 prompt 注入 system_prompt | true |
-| `time_guidance_prompt` | 时间引导 prompt（支持 `{calendar_today}` / `{daily_schedule_state}`） | 内置默认 |
+| `time_guidance_enabled` | 启用时间引导注入（规则→system_prompt，数据→extra_user_content_parts） | true |
 | `use_astrbot_timezone` | 跟随 AstrBot 全局时区 | false |
 | `timezone` | IANA 时区名（如 Asia/Shanghai） | "" |
+
+> 规则文本硬编码在 `constants.py`，不开放 webui 编辑——避免用户改动破坏 XML 标签引用与缓存前缀稳定性。如需自定义请直接编辑源码。
 
 ### `daily_schedule`（单日日程表）
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `enable_schedule` | 启用 `{daily_schedule_state}` 解析 | false |
+| `enable_schedule` | 启用日程表时段感知（命中时段的 state_prompt 注入到动态数据块） | false |
 | `schedule_templates` | 时段定义列表（支持「⏰ 时段」与「🌙 睡眠时段（预设）」两种模板，含名称/起止时间/状态描述） | [] |
 | `ai_generate_provider_id` | `/schedule create` 所用模型 provider_id（留空跟随主模型） | "" |
 | `ai_generate_use_persona` | `/schedule create` 是否拼接当前人设 prompt 作为联合输入 | true |
@@ -42,8 +43,7 @@
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `enable_calendar` | 启用 `{calendar_today}` 解析 | false |
-| `calendar_empty_text` | 当日无事项时的默认文本 | `无` |
+| `enable_calendar` | 启用当日事项解析（事项文本注入到 `<TODAY_EVENTS>` 标签；空时省略） | false |
 | `ai_generate_provider_id` | `/calendar create` 所用模型 provider_id（留空跟随主模型） | "" |
 | `ai_generate_worldview` | `/calendar create` 使用的世界观/主题 | "" |
 | `enable_builtin_events` | 启用内置现实日历事件 | true |

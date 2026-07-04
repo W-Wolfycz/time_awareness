@@ -159,13 +159,13 @@ class CalendarStore:
                 result.append(e)
         return result
 
-    def today_text(self, now, separator: str = "、", empty_text: str = "", include_builtin: bool = True) -> str:
-        """拼接「今天」的所有事项文本。"""
+    def today_text(self, now, separator: str = "、", include_builtin: bool = True) -> str:
+        """拼接「今天」的所有事项文本；无事项返回空串。"""
         events = self.events_for_date(now.year, now.month, now.day, include_builtin=include_builtin)
         texts = [str(e.get("text", "")).strip() for e in events]
         texts = [text for text in texts if text]
         if not texts:
-            return empty_text
+            return ""
         return separator.join(texts)
 
 

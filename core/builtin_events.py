@@ -339,7 +339,7 @@ def gen_almanac(year: int) -> list:
     """生成黄历每日事件（一年 365/366 条）。
 
     每日一条，包含干支日、冲煞（生肖+方位）、宜、忌。信息量较大但每日才
-    一条，注入 ``{calendar_today}`` 时可控（约 40 字/天）。
+    一条，注入 ``<TODAY_EVENTS>`` 标签时可控（约 40 字/天）。
 
     - ``getDayInGanZhi()`` → 干支日（如 "辛未"）
     - ``getDayChongShengXiao()`` → 冲的生肖（"牛" 比 "丑" 直观）

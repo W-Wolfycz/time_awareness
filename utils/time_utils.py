@@ -93,7 +93,7 @@ def find_active_schedule_slot(
 ) -> dict | None:
     """返回当前时间命中的时段 dict；未命中返回 None。
 
-    用于 {daily_schedule_state} 占位符解析。命中规则：
+    用于 ``<SCHEDULE_STATE>`` 标签的状态文本解析。命中规则：
     - 遍历 schedule_templates，每个时段用 _is_in_range 判断（支持跨午夜）
     - end_time exclusive：当前时间 < end_time 才算命中，连续时段边界（如 08:00）不会双命中
     - 多个时段命中时取列表顺序的第一个（运行期不重排）

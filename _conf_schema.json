@@ -4,16 +4,10 @@
         "type": "object",
         "items": {
             "time_guidance_enabled": {
-                "description": "✅ 启用时间感知增强提示词",
+                "description": "✅ 启用时间感知增强",
                 "type": "bool",
                 "default": true,
-                "hint": "启用后，将固定时间使用指南追加到 system_prompt 末尾，指导 AI 正确处理时间相关表述"
-            },
-            "time_guidance_prompt": {
-                "description": "📝 时间感知增强提示词(system_prompt)",
-                "type": "text",
-                "default": "<TIME_GUIDE>\n时间感知规则（必须严格遵守）：\n1. 真实性：下方\"当日事项\"是今日事件、节日、纪念日的唯一可信来源；其他时间细节也禁止编造或推测。\n2. 自然回应：优先使用自然口语（如\"刚才\"、\"大半夜\"、\"好久不见\"）替代数字报时，仅在用户明确询问时提供精确时间。\n3. 状态映射：参考下方\"当前时段状态\"自然带入人设（不刻意强调数字）。状态值为「未指定」时按人设与时段常识自由演绎即可。\n4. 上下文感知：参考对话历史的时间分布调整语气（多条消息间隔较长可表露想念，刚聊过则保持连贯）；睡眠时段被叫醒时按人设自然表现困意。\n\n当前时段状态：{daily_schedule_state}\n当日事项：{calendar_today}\n</TIME_GUIDE>",
-                "hint": "追加到 system_prompt 末尾的固定时间指南。支持占位符：{calendar_today}、{daily_schedule_state}"
+                "hint": "启用后，静态时间规则追加到 system_prompt 末尾（保 Prompt 缓存），当前时段状态与当日事项作为额外内容块注入到当前轮 user 消息末尾（不持久化到历史）。规则文本硬编码在 constants.py，不可在 webui 修改"
             },
             "use_astrbot_timezone": {
                 "description": "🌐 跟随 AstrBot 时区",
@@ -32,13 +26,13 @@
     "daily_schedule": {
         "description": "🗓️ 单日日程表（时段状态感知）",
         "type": "object",
-        "hint": "按时间段定义角色状态（晨起/元气/入夜/睡眠...），命中时段的描述通过 {daily_schedule_state} 占位符注入到时间感知 prompt。",
+        "hint": "按时间段定义角色状态（晨起/元气/入夜/睡眠...），命中时段的描述通过 <SCHEDULE_STATE> 标签注入到当前轮 user 消息末尾。",
         "items": {
             "enable_schedule": {
                 "description": "✅ 启用日程表感知",
                 "type": "bool",
                 "default": false,
-                "hint": "启用后，{daily_schedule_state} 占位符会解析为当前命中时段的 state_prompt；未命中任何时段时返回「未指定」"
+                "hint": "启用后，当前命中时段的 state_prompt 会注入到 <SCHEDULE_STATE> 标签；未命中任何时段时返回「未指定（按人设自然推断）」"
             },
             "schedule_templates": {
                 "description": "时段定义",
@@ -67,10 +61,10 @@
                                 "hint": "exclusive：当前时间 < end_time 才算命中，连续时段边界不会双命中。跨午夜时段 end_time 是次日时刻"
                             },
                             "state_prompt": {
-                                "description": "💬 状态描述({daily_schedule_state})",
+                                "description": "💬 状态描述(<SCHEDULE_STATE>)",
                                 "type": "text",
                                 "default": "",
-                                "hint": "命中此时段时注入到 {daily_schedule_state} 的文本。建议 50-200 字，描述角色的生理/情绪/语气状态，不改写人设核心。可使用XML例如 <SLEEP_MODE>...</SLEEP_MODE>"
+                                "hint": "命中此时段时填入 <SCHEDULE_STATE> 标签的文本。建议 50-200 字，描述角色的生理/情绪/语气状态，不改写人设核心。可使用XML例如 <SLEEP_MODE>...</SLEEP_MODE>"
                             }
                         }
                     },
@@ -97,10 +91,10 @@
                                 "hint": "exclusive：当前时间 < end_time 才算命中，连续时段边界不会双命中。跨午夜时段 end_time 是次日时刻"
                             },
                             "state_prompt": {
-                                "description": "💬 状态描述({daily_schedule_state})",
+                                "description": "💬 状态描述(<SCHEDULE_STATE>)",
                                 "type": "text",
                                 "default": "<SLEEP_MODE>\n当前是睡眠时段，你刚被消息叫醒或正在半梦半醒之间。请按人设自然回应——可带困意、含糊、迟疑、不情愿，但不要拒对不起对话；允许偶尔走神、把话说半句、打哈欠。\n</SLEEP_MODE>",
-                                "hint": "命中此时段时注入到 {daily_schedule_state} 的文本。建议 50-200 字，描述角色的生理/情绪/语气状态，不改写人设核心。可使用XML例如 <SLEEP_MODE>...</SLEEP_MODE>"
+                                "hint": "命中此时段时填入 <SCHEDULE_STATE> 标签的文本。建议 50-200 字，描述角色的生理/情绪/语气状态，不改写人设核心。可使用XML例如 <SLEEP_MODE>...</SLEEP_MODE>"
                             }
                         }
                     }
@@ -137,13 +131,7 @@
                 "description": "✅ 启用时间表功能",
                 "type": "bool",
                 "default": false,
-                "hint": "启用后，{calendar_today} 占位符会解析为当天的时间表事项（可用于时间感知提示词与睡眠提示）。关闭时占位符返回「无事项时的默认文本」配置的值"
-            },
-            "calendar_empty_text": {
-                "description": "📭 无事项时的默认文本",
-                "type": "text",
-                "default": "无",
-                "hint": "当天没有任何事项时，{calendar_today} 返回的文本。默认「无」让 LLM 明确知道今日无特殊事件；可改为空字符串或自定义文本"
+                "hint": "启用后，当日事项会作为 <TODAY_EVENTS> XML 标签注入到当前轮 user 消息末尾。无事项时该标签整体省略（LLM 从缺失推断「今日无特殊事件」）"
             },
             "ai_generate_provider_id": {
                 "description": "🤖 AI 生成时间表使用的模型(provider_id)",
@@ -202,7 +190,7 @@
                         "description": "📜 黄历（每日干支/宜忌）",
                         "type": "bool",
                         "default": false,
-                        "hint": "每日一条：干支日 + 冲煞（生肖+方位）+ 宜 + 忌（前 4 项）。一年约 365 条，每日注入 {calendar_today} 约 40 字。例：「黄历 辛未日 冲牛煞西 宜:嫁娶、祭祀、祈福、求嗣 忌:安葬、开生坟、行丧」。默认关闭，按需启用"
+                        "hint": "每日一条：干支日 + 冲煞（生肖+方位）+ 宜 + 忌（前 4 项）。一年约 365 条，每日约 40 字注入 <TODAY_EVENTS> 标签。例：「黄历 辛未日 冲牛煞西 宜:嫁娶、祭祀、祈福、求嗣 忌:安葬、开生坟、行丧」。默认关闭，按需启用"
                     }
                 }
             }

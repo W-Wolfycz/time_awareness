@@ -2,8 +2,9 @@
 time_awareness — 时间感知增强
 
 为 LLM 注入：
-1. 时间引导 prompt → system_prompt 末尾（含 {calendar_today} / {daily_schedule_state} 占位符）
-2. 命中日程表时段时，占位符展开为对应 state_prompt（睡眠段可用 <SLEEP_MODE> 包裹）
+1. 静态时间规则 → system_prompt 末尾（保 Prompt 缓存前缀稳定）
+2. 当前时段状态 / 当日事项 → extra_user_content_parts + mark_as_temp
+   （注入到当前轮 user 消息末尾，不持久化到历史）
 
 日历管理通过聊天命令 `/calendar show|add|del|create|export|import|help`。
 日程表管理通过 `/schedule create|show|help`。
@@ -17,12 +18,14 @@ time_awareness — 时间感知增强
 import asyncio
 import datetime
 import os
+import re
 
 from astrbot.api import AstrBotConfig
 from .log import logger, configure as configure_log, tag
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.agent.message import TextPart
 from astrbot.core.message.message_event_result import MessageChain, MessageEventResult, ResultContentType
 from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
 from astrbot.core.platform.message_type import MessageType
@@ -32,7 +35,6 @@ from .constants import (
     DEFAULT_LATE_PROMPT,
     DEFAULT_SCHEDULE_GENERATE_SYSTEM_PROMPT,
     DEFAULT_TIME_GUIDANCE_PROMPT,
-    LEGACY_DEFAULT_TIME_GUIDANCE_PROMPT,
 )
 from .core.builtin_events import (
     ALL_CATEGORIES,
@@ -64,8 +66,8 @@ class CalendarPlusPlugin(Star):
         super().__init__(context)
         self.config = config or {}
 
-        # 日志提级：debug → info（参照 chat_memory 的 debug_to_info 模式）
-        # 日志前缀带 bot 实例标识：区分多 bot 共存场景（参照 emotion_favour）
+        # 日志提级：debug → info
+        # 日志前缀带 bot 实例标识：区分多 bot 共存场景
         log_cfg = self.config.get("log", {})
         configure_log(
             debug_to_info=log_cfg.get("debug_to_info", False),
@@ -246,10 +248,11 @@ class CalendarPlusPlugin(Star):
     ) -> None:
         """合并多任务成一次 LLM 调用，把回复发出去。
 
-        完整上下文：
-        - system_prompt = 人设 prompt + 时间引导 prompt（含 {daily_schedule_state} 占位符，
-          命中睡眠/清醒时段时自动展开为对应 state_prompt）
-        - prompt（本轮 user）= 各任务的提示文本拼接 + 迟到提示（如迟到）
+        system_prompt 顺序：persona → 静态时间规则 → 动态时段/事项数据。
+        前两段跨次调用字节稳定，命中 provider Prompt 缓存前缀；最后一段每次新生。
+        主动消息无 extra_user_content_parts 入口（直调 llm_generate），动态数据只能塞 system_prompt。
+
+        prompt（本轮 user）= 各任务的提示文本拼接 + 迟到提示（如迟到）。
 
         发送阶段走 OnDecoratingResultEvent 装饰链（仿 proactive_chat），
         让 splitter_w / attool / wakepro 等装饰器改写结果链。
@@ -261,11 +264,9 @@ class CalendarPlusPlugin(Star):
         if any(t.kind == "calendar" for t in tasks):
             self._check_builtin_fresh()
 
-        # ---- 1. 构造 system_prompt ----
+        # ---- 1. 构造 system_prompt：persona → 静态规则 → 动态数据 ----
         system_parts = []
         persona_prompt = ""
-
-        # 人设 prompt（参考 emotion_favour 的简化方案）
         try:
             persona = await self.context.persona_manager.get_default_persona_v3(session)
             persona_prompt = (persona or {}).get("prompt") or ""
@@ -274,16 +275,15 @@ class CalendarPlusPlugin(Star):
         except Exception as e:
             logger.warning(f"{tag()} ⚠️ 获取人设失败 session={session}: {e}")
 
-        # 时间引导 prompt（time_awareness 自己的；含 {daily_schedule_state} 占位符）
-        guidance = self._resolve_placeholders(self._effective_time_guidance_prompt())
-        if guidance:
-            system_parts.append(guidance)
+        # 静态规则 + 动态数据：让缓存前缀最大化（前段稳定，末段新生）
+        if self._time_guidance_enabled():
+            system_parts.append(DEFAULT_TIME_GUIDANCE_PROMPT)
+            system_parts.append(self._build_dynamic_time_data())
 
         system_prompt = "\n\n".join(system_parts)
         logger.debug(
             f"{tag()} 🔧 主动消息 system_prompt: session={session} "
-            f"persona={len(persona_prompt)}字 guidance={len(guidance)}字 "
-            f"→ 合并 {len(system_prompt)} 字"
+            f"persona={len(persona_prompt)}字 → 合并 {len(system_prompt)} 字"
         )
 
         # ---- 2. 构造本轮 prompt ----
@@ -544,29 +544,36 @@ class CalendarPlusPlugin(Star):
         except Exception:
             return None
 
-    # ==================== 时间引导 / 睡眠 / 占位符 ====================
+    # ==================== 时间引导 / 状态解析 ====================
 
-    def _effective_time_guidance_prompt(self) -> str:
-        """读取自定义提示词；为空或等于旧默认值时回退到新默认值。"""
-        ta = self.config.get("time_awareness", {})
-        if not ta.get("time_guidance_enabled", True):
-            return ""
-        custom = (ta.get("time_guidance_prompt") or "").strip()
-        if not custom or custom == LEGACY_DEFAULT_TIME_GUIDANCE_PROMPT:
-            return DEFAULT_TIME_GUIDANCE_PROMPT
-        return custom
+    def _time_guidance_enabled(self) -> bool:
+        """时间引导总开关（仅控制注入与否；规则文本与数据格式硬编码在 constants）。"""
+        return bool(self.config.get("time_awareness", {}).get("time_guidance_enabled", True))
 
-    def _resolve_calendar_today(self) -> str:
-        """{calendar_today} 的取值：当日事项按「、」拼接，无事项返回 empty_text。"""
+    def _build_dynamic_time_data(self) -> str:
+        """动态时间数据：当前时段状态 + 当日事项，XML 标签包裹。
+
+        - ``<SCHEDULE_STATE>`` 总是输出（rule 3 显式处理「未指定」语义）
+        - ``<TODAY_EVENTS>`` 仅在有事项时输出；空时省略标签，让 LLM 从缺失推断「今日无特殊事件」
+
+        正常对话路径：作为 ``extra_user_content_parts`` 注入到当前轮 user 消息末尾。
+        主动消息路径：拼到 system_prompt 末尾（无 extra_user_content_parts 入口）。
+        """
+        state = self._resolve_schedule_state()
+        events = self._today_events_text()
+        parts = [f"<SCHEDULE_STATE>{state}</SCHEDULE_STATE>"]
+        if events:
+            parts.append(f"<TODAY_EVENTS>{events}</TODAY_EVENTS>")
+        return "\n".join(parts)
+
+    def _today_events_text(self) -> str:
+        """当日事项文本：按「、」拼接；无事项返回空串（由调用方决定是否省略 XML 标签）。"""
         cal = self.config.get("calendar", {})
         if not cal.get("enable_calendar", False):
-            return cal.get("calendar_empty_text", "") or ""
+            return ""
         now = get_now(self.config, self._astrbot_config())
-        empty_text = cal.get("calendar_empty_text", "") or ""
         include_builtin = cal.get("enable_builtin_events", True) and bool(self._enabled_builtin_categories())
-        return calendar_store.today_text(
-            now, empty_text=empty_text, include_builtin=include_builtin
-        )
+        return calendar_store.today_text(now, include_builtin=include_builtin)
 
     # ==================== 内置日历事件 ====================
 
@@ -596,7 +603,7 @@ class CalendarPlusPlugin(Star):
         return result
 
     def _resolve_schedule_state(self) -> str:
-        """{daily_schedule_state} 的取值：命中时段的 state_prompt；未命中返回占位文本。
+        """当前命中时段的 state_prompt；未命中返回占位文本。
 
         - 未启用日程表感知 → 返回「未指定（按人设自然推断）」
         - 启用但未命中任何时段（gap）→ 同上
@@ -617,13 +624,6 @@ class CalendarPlusPlugin(Star):
             f"{slot.get('start_time')}-{slot.get('end_time')} state_prompt={len(state)}字"
         )
         return state or "未指定（按人设自然推断）"
-
-    def _resolve_placeholders(self, text: str) -> str:
-        if not text:
-            return ""
-        text = text.replace("{calendar_today}", self._resolve_calendar_today())
-        text = text.replace("{daily_schedule_state}", self._resolve_schedule_state())
-        return text
 
     def _try_save_config(self) -> None:
         """落盘 self.config（迁移 / 命令覆盖后调用）。
@@ -688,23 +688,28 @@ class CalendarPlusPlugin(Star):
                     else:
                         occupied[m] = idx
 
-    @staticmethod
-    def _append_system_prompt(req, additional: str) -> None:
-        additional = (additional or "").strip()
-        if not additional:
-            return
-        system_prompt = getattr(req, "system_prompt", "") or ""
-        if system_prompt.strip():
-            req.system_prompt = f"{system_prompt.rstrip()}\n\n{additional}"
-        else:
-            req.system_prompt = additional
-
     @filter.on_llm_request()
     async def inject_time_context(self, event: AstrMessageEvent, req: ProviderRequest):
-        """时间引导 prompt（含 {calendar_today} / {daily_schedule_state} 占位符）→ system_prompt 末尾。"""
+        """时间引导注入（按 wiki.txt 规范拆双路）：
+
+        - 静态规则 ``DEFAULT_TIME_GUIDANCE_PROMPT`` → ``req.system_prompt`` 末尾。
+          system_prompt 永远字节稳定（除了规则文本就是 persona），命中 provider Prompt 缓存。
+        - 动态数据（``<SCHEDULE_STATE>`` + ``<TODAY_EVENTS>``）→ ``req.extra_user_content_parts``，
+          ``mark_as_temp()`` 标记后历史持久化时被剥掉，下一轮历史里消失。
+
+        动态数据本质上只是"当前态"信息，不需要在历史里累积；persona + 静态规则在
+        system_prompt 永远在场，LLM 推理不受影响。
+        """
+        if not self._time_guidance_enabled():
+            return
         try:
-            guidance = self._resolve_placeholders(self._effective_time_guidance_prompt())
-            self._append_system_prompt(req, guidance)
+            existing = (getattr(req, "system_prompt", "") or "").strip()
+            rules = DEFAULT_TIME_GUIDANCE_PROMPT
+            req.system_prompt = (
+                f"{existing.rstrip()}\n\n{rules}" if existing else rules
+            )
+            dyn = self._build_dynamic_time_data()
+            req.extra_user_content_parts.append(TextPart(text=dyn).mark_as_temp())
         except Exception as e:
             logger.error(f"{tag(event)} ❌ on_llm_request 注入失败: {e}")
 
@@ -1084,8 +1089,8 @@ class CalendarPlusPlugin(Star):
             "/schedule help  — 显示本帮助\n"
             "\n"
             "说明：\n"
-            "- 时段状态通过 {daily_schedule_state} 占位符注入到时间感知 prompt\n"
-            "- 未启用日程表感知时占位符返回「未指定（按人设自然推断）」\n"
+            "- 命中时段的 state_prompt 通过 <SCHEDULE_STATE> 标签注入到当前轮 user 消息末尾\n"
+            "- 未启用日程表感知或未命中任何时段时返回「未指定（按人设自然推断）」\n"
             "- 时段编辑也可在 AstrBot 主 webui 配置 daily_schedule.schedule_templates 完成\n"
             "\n"
             "时间格式：HH:MM（24 小时制）\n"

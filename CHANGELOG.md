@@ -1,5 +1,26 @@
 # 更新日志
 
+## 1.5.1
+2026-07-05
+
+### 变更
+- **时间数据迁到 extra_user_content_parts**：动态时段状态与当日事项不再拼到 system_prompt，改走 `req.extra_user_content_parts` + `mark_as_temp()` 注入到当前轮 user 消息末尾。system_prompt 仅保留静态规则——避免每轮动态变化破坏模型服务端 Prompt 缓存（命中后费用约降至 10%）。历史持久化时这部分被剥掉（mark_as_temp），不污染历史
+- **主动消息也优化缓存前缀**：persona + 静态规则 + 动态数据三段顺序拼接，前两段稳定，跨次主动消息调用间共享 provider 缓存前缀
+- **`time_guidance_prompt` 配置项移除**：静态规则硬编码到 `constants.DEFAULT_TIME_GUIDANCE_PROMPT`。规则文本与 XML 标签格式强耦合，开放自定义容易破坏；同步消除 schema 默认值 ↔ constants 的不一致风险
+- **`calendar_empty_text` 配置项移除 + 无事项省略 XML 标签**：当日无事项时直接省略 `<TODAY_EVENTS>` 标签——比硬编码"无"语义更干净（避免与字面事件名混淆），LLM 从标签缺失自然推断"今日无特殊事件"。规则 1 文案同步更新，明示 `<TODAY_EVENTS>` 可能缺席
+- **AI 生成日程表 JSON 解析兜底修复**：`_parse_schedule_json` 的 `re.search` 兜底分支此前因 `import re` 被误删会 NameError，已加回
+
+### 移除
+- `_conf_schema.json` 的 `time_awareness.time_guidance_prompt` 字段
+- `_conf_schema.json` 的 `calendar.calendar_empty_text` 字段
+- `main.py` 的 `_effective_time_guidance_prompt` / `_resolve_placeholders` / `_append_system_prompt` 方法
+- `main.py` 的 `_resolve_calendar_today` 中 `empty_text` 读取逻辑
+- `constants.py` 的 `LEGACY_DEFAULT_TIME_GUIDANCE_PROMPT` 常量（迁移锚点，已无用途）
+
+### 已知行为变化
+- **历史 user 消息不再含时段/事项数据**：`mark_as_temp` 让历史持久化时剥掉这部分。LLM 看历史只看到用户原文，但当前轮实时数据始终在最新 user 消息末尾——对时间感知无影响（只有"现在"是相关的）
+- **用户自定义的 `time_guidance_prompt` / `calendar_empty_text` 升级后失效**：字段从 schema 删除，AstrBot 自动剥离。需要自定义的用户请直接编辑 `constants.py`
+
 ## 1.5
 2026-07-02
 

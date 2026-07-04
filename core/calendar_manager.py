@@ -2,7 +2,7 @@
 时间表（日历事项）管理器
 
 负责 ``calendar_data.yaml`` 的读写、事项 CRUD、批量清除、导入/导出与校验。
-读写完成后回填 ``calendar_store`` 单例，供占位符解析（``{calendar_today}``）使用。
+读写完成后回填 ``calendar_store`` 单例，供 ``<TODAY_EVENTS>`` 标签注入使用。
 
 数据文件位于插件数据目录（``StarTools.get_data_dir``），全局共享一份时间表
 （不区分会话）。历史 ``calendar_data.json`` 会在首次加载时自动迁移为 YAML
