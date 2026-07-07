@@ -4,8 +4,8 @@
 
 ## 功能
 
-- **时间引导 prompt**：静态时间规则追加到 `system_prompt` 末尾（保 Prompt 缓存），当前时段状态与当日事项作为额外内容块注入到当前轮 user 消息末尾（`mark_as_temp` 不持久化到历史）
-- **单日日程表**：按时间段定义角色状态（晨起 / 元气 / 入夜 / 睡眠...），命中时段描述通过动态数据块注入 prompt；睡眠窗口视为一个普通时段统一管理
+- **时间引导**：让 LLM 自然地用口语化方式表达时间（"刚才"、"大半夜"、"好久不见"），不刻意报时；并真实感知当前所处时段与今日事项
+- **单日日程表**：按时间段定义角色状态（晨起 / 元气 / 入夜 / 睡眠...），命中时段描述自动注入到时间感知；睡眠窗口视为一个普通时段统一管理
 - **AI 日历生成**：用户给一个世界观/主题，LLM 一次性生成一整年日历事项
 - **现实日历事件**：法定节假日（含调休）/ 传统农历节日 / 二十四节气 / 政治纪念日 / 国际西方节日 / 黄历（每日干支/宜忌）
 - **主动提醒**：当日事项在指定时刻主动发到白名单会话；LLM 可通过 `schedule_followup` 工具自行安排后续主动消息；WebUI 可手动添加一次性任务
@@ -23,28 +23,28 @@
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `time_guidance_enabled` | 启用时间引导注入（规则→system_prompt，数据→extra_user_content_parts） | true |
+| `time_guidance_enabled` | 启用时间引导注入 | true |
 | `use_astrbot_timezone` | 跟随 AstrBot 全局时区 | false |
 | `timezone` | IANA 时区名（如 Asia/Shanghai） | "" |
 
-> 规则文本硬编码在 `constants.py`，不开放 webui 编辑——避免用户改动破坏 XML 标签引用与缓存前缀稳定性。如需自定义请直接编辑源码。
+> 时间引导规则文本硬编码在源码中，不开放 webui 编辑（与 XML 标签格式强耦合，自定义易破坏）。
 
 ### `daily_schedule`（单日日程表）
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `enable_schedule` | 启用日程表时段感知（命中时段的 state_prompt 注入到动态数据块） | false |
+| `enable_schedule` | 启用日程表时段感知 | false |
 | `schedule_templates` | 时段定义列表（支持「⏰ 时段」与「🌙 睡眠时段（预设）」两种模板，含名称/起止时间/状态描述） | [] |
-| `ai_generate_provider_id` | `/schedule create` 所用模型 provider_id（留空跟随主模型） | "" |
-| `ai_generate_use_persona` | `/schedule create` 是否拼接当前人设 prompt 作为联合输入 | true |
+| `ai_generate_provider_id` | `/schedule create` 所用模型（留空跟随主模型） | "" |
+| `ai_generate_use_persona` | `/schedule create` 是否联合当前人设作为输入 | true |
 | `ai_generate_worldview` | `/schedule create` 使用的世界观/主题 | "" |
 
 ### `calendar`（日历）
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `enable_calendar` | 启用当日事项解析（事项文本注入到 `<TODAY_EVENTS>` 标签；空时省略） | false |
-| `ai_generate_provider_id` | `/calendar create` 所用模型 provider_id（留空跟随主模型） | "" |
+| `enable_calendar` | 启用当日事项感知（无事项时不输出日历标签） | false |
+| `ai_generate_provider_id` | `/calendar create` 所用模型（留空跟随主模型） | "" |
 | `ai_generate_worldview` | `/calendar create` 使用的世界观/主题 | "" |
 | `enable_builtin_events` | 启用内置现实日历事件 | true |
 
@@ -59,7 +59,7 @@
 | `solar_terms` | 二十四节气 | true |
 | `political` | 政治纪念日 | false |
 | `international` | 国际/西方节日 | false |
-| `almanac` | 黄历（每日干支/冲煞/宜忌，一年约 365 条） | false |
+| `almanac` | 黄历（每日干支/冲煞/宜忌） | false |
 
 ### `reminder`（主动提醒）
 
@@ -71,7 +71,7 @@
 | `reminder_max_late_minutes` | 迟到容忍窗口（分钟，超出则丢弃） | 60 |
 | `reminder_late_prompt` | 补发时附加的迟到提示词 | 内置默认 |
 | `followup_tool_enabled` | 向 LLM 注册 `schedule_followup` 工具 | true |
-| `reminder_provider_id` | 主动提醒使用的模型 provider_id（留空跟随主模型） | "" |
+| `reminder_provider_id` | 主动提醒使用的模型（留空跟随主模型） | "" |
 
 ### `log`（日志）
 
@@ -121,14 +121,9 @@
 
 配置修改仍走 AstrBot 主 webui 的「插件配置」页，WebUI 暂为只读视图（任务 tab 除外）。
 
-## 主动消息装饰链
+## 推荐 companion 插件
 
-主动消息发送前会手动遍历 `OnDecoratingResultEvent` 装饰钩子（仿 `astrbot_plugin_proactive_chat`），让以下装饰器也能改写主动消息：
-
-- **splitter_w**（推荐）：切段 + 段间随机延迟模拟打字节奏
-- **astrbot_plugin_attool**：群聊 At 渲染
-
-未装 splitter_w 时主动消息会一整条直发，失去打字节奏感。
+主动消息发送前会走消息装饰器处理链。**强烈推荐配合 [splitter_w](https://github.com/Soulter/astrbot_plugin_splitter_w) 使用**——未装时主动消息会一整条直发，失去切段与打字节奏感。
 
 ## 文件结构
 
@@ -140,13 +135,13 @@ time_awareness/
 ├── metadata.yaml
 ├── requirements.txt
 ├── constants.py              # 默认提示词常量
-├── utils/time_utils.py       # get_tz / get_now
+├── utils/time_utils.py       # 时区与当前时间工具
 ├── core/
-│   ├── _datafile.py          # YAML 原子读写
-│   ├── calendar_store.py     # 内存单例 + 日期匹配
+│   ├── _datafile.py          # YAML 读写
+│   ├── calendar_store.py     # 日期匹配
 │   ├── calendar_manager.py   # 用户事件 CRUD + 导入导出
 │   ├── builtin_events.py     # 现实事件生成器
-│   ├── builtin_manager.py    # 内置事件文件管理 + 跨年 regen
+│   ├── builtin_manager.py    # 内置事件文件管理 + 跨年重新生成
 │   └── scheduler.py          # 提醒调度循环
 ├── pages/webui/              # 前端三件套（vanilla JS）
 └── llm/
@@ -161,7 +156,7 @@ time_awareness/
 | 文件 | 用途 |
 |------|------|
 | `calendar_data.yaml` | 用户自定义事件 |
-| `builtin_events.yaml` | 内置现实事件（每年自动 regen） |
+| `builtin_events.yaml` | 内置现实事件（每年自动重新生成） |
 | `reminder_tasks.yaml` | 主动提醒任务队列 |
 
 ## 依赖

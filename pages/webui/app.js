@@ -340,11 +340,11 @@ async function renderTasks() {
       const hintDisplay = t.hint ? escapeHtml(t.hint) : '<span style="color: var(--text-muted);">—</span>';
       return `
         <tr>
-          <td>${kindBadge}</td>
-          <td class="col-time">${escapeHtml(formatIsoLocal(t.fire_at_iso))}</td>
-          <td><code style="font-family: var(--mono); font-size: 12px; color: var(--text-muted);">${escapeHtml(t.session)}</code></td>
-          <td>${hintDisplay}${targetInfo}</td>
-          <td class="col-actions">
+          <td data-label="类型">${kindBadge}</td>
+          <td data-label="触发时间" class="col-time">${escapeHtml(formatIsoLocal(t.fire_at_iso))}</td>
+          <td data-label="会话"><code style="font-family: var(--mono); font-size: 12px; color: var(--text-muted); word-break: break-all;">${escapeHtml(t.session)}</code></td>
+          <td data-label="内容">${hintDisplay}${targetInfo}</td>
+          <td data-label="操作" class="col-actions">
             <button class="btn btn-danger btn-sm" data-cancel-id="${escapeAttr(t.id)}">取消</button>
           </td>
         </tr>

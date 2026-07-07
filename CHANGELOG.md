@@ -3,65 +3,50 @@
 ## 1.5.1
 2026-07-05
 
-### 变更
-- **时间数据迁到 extra_user_content_parts**：动态时段状态与当日事项不再拼到 system_prompt，改走 `req.extra_user_content_parts` + `mark_as_temp()` 注入到当前轮 user 消息末尾。system_prompt 仅保留静态规则——避免每轮动态变化破坏模型服务端 Prompt 缓存（命中后费用约降至 10%）。历史持久化时这部分被剥掉（mark_as_temp），不污染历史
-- **主动消息也优化缓存前缀**：persona + 静态规则 + 动态数据三段顺序拼接，前两段稳定，跨次主动消息调用间共享 provider 缓存前缀
-- **`time_guidance_prompt` 配置项移除**：静态规则硬编码到 `constants.DEFAULT_TIME_GUIDANCE_PROMPT`。规则文本与 XML 标签格式强耦合，开放自定义容易破坏；同步消除 schema 默认值 ↔ constants 的不一致风险
-- **`calendar_empty_text` 配置项移除 + 无事项省略 XML 标签**：当日无事项时直接省略 `<TODAY_EVENTS>` 标签——比硬编码"无"语义更干净（避免与字面事件名混淆），LLM 从标签缺失自然推断"今日无特殊事件"。规则 1 文案同步更新，明示 `<TODAY_EVENTS>` 可能缺席
-- **AI 生成日程表 JSON 解析兜底修复**：`_parse_schedule_json` 的 `re.search` 兜底分支此前因 `import re` 被误删会 NameError，已加回
+### 优化
+- **时间数据不再破坏 Prompt 缓存**：动态时段状态与当日事项改注入到当前轮对话末尾，不再拼到稳定提示词区。命中模型缓存后费用约降至 10%；历史对话不再保留这些临时数据（每轮重新求值，对感知无影响）
+- **主动消息也优化缓存前缀**：人设 → 时间规则 → 动态数据三段拼接，跨次主动消息调用共享稳定前缀
+- **无事项时省略日历标签**：当日无事项时不再输出占位文本，模型从标签缺失自然推断「今日无特殊事件」
 
-### 移除
-- `_conf_schema.json` 的 `time_awareness.time_guidance_prompt` 字段
-- `_conf_schema.json` 的 `calendar.calendar_empty_text` 字段
-- `main.py` 的 `_effective_time_guidance_prompt` / `_resolve_placeholders` / `_append_system_prompt` 方法
-- `main.py` 的 `_resolve_calendar_today` 中 `empty_text` 读取逻辑
-- `constants.py` 的 `LEGACY_DEFAULT_TIME_GUIDANCE_PROMPT` 常量（迁移锚点，已无用途）
+### 修复
+- **跨日扫描竞态**：极少数情况下每日扫描会在午夜前几毫秒触发，导致当日提醒被误判为过期而整日不入队——已加缓冲修复
+- **AI 生成日程表解析容错**：模型输出带 markdown 包裹的 JSON 时此前会报错——已修复
 
-### 已知行为变化
-- **历史 user 消息不再含时段/事项数据**：`mark_as_temp` 让历史持久化时剥掉这部分。LLM 看历史只看到用户原文，但当前轮实时数据始终在最新 user 消息末尾——对时间感知无影响（只有"现在"是相关的）
-- **用户自定义的 `time_guidance_prompt` / `calendar_empty_text` 升级后失效**：字段从 schema 删除，AstrBot 自动剥离。需要自定义的用户请直接编辑 `constants.py`
+### 破坏性
+- 移除配置项 `time_awareness.time_guidance_prompt`：时间规则与 XML 标签格式强耦合，开放自定义易破坏；现硬编码到源码，需要自定义请直接编辑 `constants.py`
+- 移除配置项 `calendar.calendar_empty_text`：被「省略标签」机制取代
+- 用户自定义过的上述字段升级后自动失效
 
 ## 1.5
 2026-07-02
 
 ### 变更
 - **插件更名**：display_name 改为「时间感知增强」
-- **删除 `calendar_separator` 配置项**：默认「、」足够中文排版，硬编码到 `calendar_store.today_text` 默认参数
-- **配置 description 加代码术语标注**：`time_guidance_prompt`(system_prompt)、`state_prompt`({daily_schedule_state})、三个 `*_provider_id`、`reminder_targets`(UMO)
-- **优化默认 `time_guidance_prompt`**：规则 3 增加 `{daily_schedule_state}` 为「未指定」时的处理（按人设与时段常识自由演绎）
-- **配置 hint 文案精简**：删除「可用 \n 换行」「与用户自定义事件合并显示」「系统提示词由插件内置」等冗余说明
-- **修复 constants/schema 默认提示词不一致**：`constants.DEFAULT_TIME_GUIDANCE_PROMPT` 此前停留在 v1.3 版本，导致旧默认值回退路径失效；现同步到 v1.4 版本
-- **`.gitignore` 加防御性忽略**：runtime yaml 文件 + `data/`（防 fallback 路径污染仓库）
+- **删除 `calendar_separator` 配置项**：默认「、」足够中文排版，硬编码到代码
+- **配置项描述加 Emoji**，hint 文案精简
+- 修复默认时间引导 prompt 停留在旧版本导致的回退路径失效
 
-### 移除
-- `calendar_separator` schema 字段
-- `main.py` 中 `_resolve_calendar_today` 的 separator 读取与传参
+### 破坏性
+- `calendar_separator` 字段移除（AstrBot 自动剥离）
 
 ## 1.4.2
 2026-07-01
 
 ### 变更
-- **主动消息走 OnDecoratingResultEvent 装饰链**：在发送前手动遍历装饰钩子 handler（仿 `astrbot_plugin_proactive_chat`），让 splitter_w / attool / wakepro 等装饰器能改写主动消息结果链
-- **取消 chat_memory 上下文拉取**：主动消息是「bot 主动开口」语境，不需要历史对话；同时减少 token 开销
-- **删除 `<time>` 标签清洗**：CM 上下文取消后无来源，相关 `on_llm_response` 钩子 + `_TIME_TAG_PATTERN` 正则一并删除
-
-### 移除
-- `_fetch_history_contexts` / `_resolve_chat_memory` / `_build_chain` / `__init__._chat_memory`
-- `strip_time_tags_from_response` 钩子 + `_TIME_TAG_PATTERN`
-- `_conf_schema.json` 的 `reminder.include_history` / `reminder.history_rounds`
+- **主动消息支持消息装饰器**：安装了 splitter_w / attool 等装饰器的部署，主动消息也会走切段、At 渲染等处理
+- **主动消息不再拉取历史对话**：bot 主动开口语境不需要历史；同时减少 token 开销
 
 ### 已知行为变化
-- **未装 splitter_w 时主动消息一整条直发**：失去自切段打字节奏。装了 splitter_w 的部署不受影响
+- 未装 splitter_w 时主动消息会一整条直发，失去打字节奏感
 
 ## 1.4.1
 2026-07-01
 
 ### 变更
-- **取消 config_version 链式迁移框架**：AstrBot 加载配置时按 schema 剥离非 schema 字段并立即覆盖磁盘，剥离发生在 plugin `__init__` 之前，migrate 函数永远读不到已删字段；该路径不可行
-- **`schedule_templates` 新增「🌙 睡眠时段（预设）」模板**：v1.3 老睡眠功能的一键恢复路径
+- `schedule_templates` 新增「🌙 睡眠时段（预设）」模板：v1.3 老睡眠功能的一键恢复路径
 
 ### 移除
-- `migrate.py`、`_conf_schema.json` 的 `config_version`、`constants.LEGACY_DEFAULT_SLEEP_PROMPT`
+- 取消 `config_version` 链式迁移框架（不可行路径，AstrBot 在插件加载前已剥离非 schema 字段）
 
 ### 升级建议
 - v1.3.0 老用户升级后睡眠窗口若丢失：到 daily_schedule 配置组点「添加项」→「🌙 睡眠时段（预设）」一键恢复
@@ -70,64 +55,38 @@
 2026-06-30
 
 ### 新增
-- **单日日程表（时段状态感知）**：按时间段定义角色状态，命中时段描述通过 `{daily_schedule_state}` 占位符注入时间感知 prompt
-- **template_list 表单编辑**：AstrBot 主 webui 表单化添加时段，支持跨午夜
+- **单日日程表（时段状态感知）**：按时间段定义角色状态，命中时段描述注入到时间引导
+- **表单化添加时段**：AstrBot 主 webui 表单编辑，支持跨午夜
 - **`/schedule create|show|help` 命令**：LLM 自主生成日程表
 - 启动时时段重叠检测（warning）
 
-### 变更（破坏性）
-- **删除 `sleep_mode_enabled` / `sleep_hours` / `sleep_prompt` 三字段**：合并到 `daily_schedule.schedule_templates`
-- sleep_prompt 注入位点从「user message 后 extra」统一到「system_prompt 占位符」
-- 默认时间引导 prompt 规则 3 改写为「参考当前时段状态自然带入人设」
-
-### 移除
-- `time_utils.is_sleep_time` / `get_sleep_prompt_if_active`
-- `main.py._append_dynamic_content`（仅 sleep_prompt 用）
+### 破坏性
+- **合并睡眠配置到日程表**：删除 `sleep_mode_enabled` / `sleep_hours` / `sleep_prompt` 三字段，统一到 `daily_schedule.schedule_templates`
 
 ## 1.3.0
 2026-06-29
 
 ### 新增
-- **WebUI 任务 tab「新增任务」入口**：管理员可在 webui 安排一次性手动提醒，新增 `kind="user"` 任务分支
-- **Web API（2 端点）**：`POST /tasks/create`（硬校验白名单 + 时间窗）、`GET /tasks/options`
+- **WebUI 任务 tab「新增任务」入口**：管理员可在 webui 安排一次性手动提醒
 - 任务列表新增「手动」badge
-
-### 变更
-- `_fire_with_llm` 新增 `user` kind 分支，prompt 语义为「到点了，请主动提起：X」
-- 群聊 At 提取兼容 `user` kind 的 `target_user_id`
-- Web API 总数 6 → 8
 
 ## 1.2.0
 2026-06-28
 
 ### 新增
 - **Plugin Pages WebUI**：概览 / 日历月视图 / 任务三视图，AstrBot 主 webui 侧边栏进入
-- **Web API（6 端点）**：`/about` / `/dashboard/stats` / `/calendar/month` / `/tasks/list` / `/tasks/cancel` / `/config/schema`
-- scheduler 暴露 `cancel_task` / `list_pending_detailed`
-
-### 优化
-- 截断 chip hover tooltip 自定义浮层（绕开浏览器原生 1-2s 延迟）
-
-### 内部
-- `builtin_events._lunar_to_solar` 加 `silent` 参数，除夕「先试 30 再试 29」改静默 fallback
+- 任务列表可取消、可查看触发时间
 
 ## 1.1.0
 2026-06-27
 
 ### 新增
 - 内置事件新增「黄历」分类（默认关）
-- 主动提醒：LLM 回复按空行切段发送，段间 0.5-2s 随机延迟模拟打字节奏
-- 群聊 followup 自动 @ 发起人（At 组件 + 零宽空格防粘连）
-- `log_with_bot_id` / `reminder_provider_id` 配置项
+- 主动提醒：模型回复按空行切段发送，段间随机延迟模拟打字节奏
+- 群聊 followup 自动 @ 发起人
 
 ### 优化
 - 配置项描述全部加 Emoji
-- `schedule_followup` 工具 docstring 不再向 LLM 暴露 @ 机制
-
-### 内部
-- 重构日历提醒为「每 session 每天一条 task」模型：到点 fire 时动态查 store
-- 用户 0 点后对日历的任何改动都会在 fire 时自动反映
-- 当日无事件且无 followup 时跳过 fire
 
 ## 1.0.0
 2026-06-26
@@ -135,28 +94,18 @@
 ### 首版
 
 **时间感知**
-- 固定时间规则 prompt 注入 `system_prompt` 末尾
-- 跨午夜睡眠窗口判定 + 睡眠提示动态注入
-- 时区支持
+- 固定时间规则注入；跨午夜睡眠窗口判定；时区支持
 
 **智能日历**
-- YAML 持久化 + `{calendar_today}` 占位符解析
-- 用户事件 CRUD + 导入导出 + 重复规则
+- YAML 持久化、用户事件 CRUD、导入导出、重复规则
 
 **现实日历事件（内置）**
-- 5 类自动生成：法定节假日 / 传统农历节日 / 二十四节气 / 政治纪念日 / 国际西方节日
-- 数据源：`chinese_calendar` + `lunar_python`
-- 法定节假日区分正日子「X 节」与调休「X 节假期」
-- 跨年与分类开关变更时自动 regen
+- 5 类自动生成：法定节假日（区分正日子与调休）/ 传统农历节日 / 二十四节气 / 政治纪念日 / 国际西方节日
+- 跨年与分类开关变更时自动重新生成
 
 **主动提醒**
 - 当日事项在指定时刻主动发到白名单会话
-- 后台调度循环：可中断睡眠、迟到容忍窗口、超窗丢弃
 - LLM 工具 `schedule_followup`
 
 **聊天命令**
-- `/calendar show|add|del|create|export|import|help`
-- `/calendar builtin_list` / `/calendar builtin_regen`
-
-**配置组**
-- `time_awareness` / `calendar` / `reminder`
+- `/calendar` 命令树（含内置事件列表 / 强制重新生成）

@@ -167,7 +167,11 @@ class CalendarPlusPlugin(Star):
                     next_midnight = (now + datetime.timedelta(days=1)).replace(
                         hour=0, minute=0, second=0, microsecond=0
                     )
-                    sleep_sec = max(60, (next_midnight - now).total_seconds())
+                    # +5s 缓冲：asyncio.sleep 实际唤醒可能早几毫秒，若卡在午夜前醒来
+                    # _scan_and_enqueue_today_events 的 cutoff 防御会把 fire_at（昨日 09:00）
+                    # 误判为超出 max_late 容忍窗口而跳过，导致当日提醒整日不入队。
+                    # +5s 让唤醒一定落在次日，max(60, ...) 仍是异常恢复下的下限。
+                    sleep_sec = max(60, (next_midnight - now).total_seconds() + 5)
                     await asyncio.sleep(sleep_sec)
                     # 醒来，扫今天的入队（add_calendar_task 内部会唤醒调度器）
                     self._scan_and_enqueue_today_events()

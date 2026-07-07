@@ -587,6 +587,130 @@ table.data-table {
   .content { padding: 14px; }
   .topbar { padding: 10px 14px; }
   .topbar-title { font-size: 15px; }
+
+  /* 概览：单列卡片，metric-value 自适应 */
+  .metrics-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .metric-value {
+    font-size: 22px;
+    word-break: break-word;
+  }
+
+  /* 日历月视图：cell 缩小、字号收紧 */
+  .calendar-grid {
+    border-radius: var(--radius);
+  }
+  .calendar-cell {
+    min-height: 72px;
+    padding: 4px 4px;
+    gap: 2px;
+  }
+  .calendar-date {
+    font-size: 12px;
+    width: 20px;
+    height: 20px;
+  }
+  .calendar-cell.today .calendar-date {
+    width: 20px;
+    height: 20px;
+  }
+  .calendar-chip {
+    font-size: 10px;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .calendar-more { font-size: 10px; padding: 1px 4px; }
+  .calendar-weekday { padding: 6px 4px; font-size: 11px; }
+  .calendar-title { font-size: 16px; min-width: 110px; }
+  .calendar-toolbar { gap: 8px; }
+
+  /* 任务工具栏：垂直堆叠 */
+  .tasks-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .tasks-toolbar-hint { font-size: 11px; }
+  #task-create-btn { align-self: flex-end; }
+
+  /* 任务表格：卡片化，每个 tr 变独立卡片 */
+  .table-wrap {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    overflow: visible;
+  }
+  .data-table thead { display: none; }
+  .data-table, .data-table tbody { display: block; width: 100%; }
+  .data-table tr {
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    box-shadow: var(--shadow-sm);
+  }
+  .data-table td {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .data-table td:last-child {
+    border-bottom: none;
+    padding-top: 12px;
+    justify-content: flex-end;
+  }
+  .data-table td::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    min-width: 64px;
+    padding-top: 2px;
+  }
+  .data-table td.col-actions::before { display: none; }
+  .data-table td code {
+    word-break: break-all;
+    font-size: 11px;
+  }
+
+  /* modal：内边距收紧 */
+  .modal-overlay { padding: 12px; }
+  .modal {
+    padding: 16px;
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+  }
+  .modal-title { font-size: 15px; }
+}
+
+@media (max-width: 480px) {
+  .content { padding: 10px; }
+  .topbar { padding: 8px 10px; }
+  .nav-item { padding: 8px 6px; font-size: 12px; gap: 4px; }
+  .nav-item svg { width: 14px; height: 14px; }
+
+  .metric-value { font-size: 18px; }
+  .metric-card { padding: 14px; }
+
+  /* 极窄屏日历：cell 进一步压缩 */
+  .calendar-cell { min-height: 56px; padding: 3px 3px; }
+  .calendar-chip { font-size: 9px; padding: 1px 3px; }
+  .calendar-weekday { padding: 4px 2px; font-size: 10px; }
+  .calendar-date { font-size: 11px; width: 18px; height: 18px; }
+  .calendar-cell.today .calendar-date { width: 18px; height: 18px; }
+
+  /* 任务卡片：进一步收紧 */
+  .data-table tr { padding: 10px 12px; margin-bottom: 10px; }
+  .data-table td::before { min-width: 56px; font-size: 10px; }
 }
 
 /* ==================== 任务页工具栏 ==================== */
