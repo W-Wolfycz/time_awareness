@@ -25,7 +25,7 @@ from astrbot.api import logger
 
 from .core.calendar_store import calendar_store
 from .log import tag
-from .utils.time_utils import get_now, get_tz
+from .utils.time_utils import coerce_to_aware, get_now, get_tz
 
 
 PLUGIN_NAME = "time_awareness"
@@ -135,12 +135,17 @@ def register_web_apis(context, plugin) -> None:
             pending = scheduler.all_pending()
 
             week_cutoff = now + timedelta(days=7)
-            near_7d = sum(1 for t in pending if t.fire_at <= week_cutoff)
+            # 任务 fire_at 与 now 可能 aware/naive 不一致（用户中途改时区配置）
+            # 用 coerce_to_aware 规整后再比较
+            near_7d = sum(
+                1 for t in pending
+                if coerce_to_aware(t.fire_at, now) <= week_cutoff
+            )
 
             next_task_display = "无"
             if pending:
-                next_t = min(pending, key=lambda t: t.fire_at)
-                delta_sec = (next_t.fire_at - now).total_seconds()
+                next_t = min(pending, key=lambda t: coerce_to_aware(t.fire_at, now))
+                delta_sec = (coerce_to_aware(next_t.fire_at, now) - now).total_seconds()
                 if delta_sec < 0:
                     next_task_display = "已到期"
                 else:
@@ -149,6 +154,14 @@ def register_web_apis(context, plugin) -> None:
             month_events = calendar_store.events_for_month(
                 now.year, now.month, include_builtin=True
             )
+
+            # 时间感知面板数据（hero card 用）
+            # 失败时降级为空字典，前端按字段缺失处理
+            try:
+                time_info = plugin.build_dashboard_time_info()
+            except Exception as e:
+                logger.warning(f"{tag()} ⚠️ build_dashboard_time_info 失败: {e}")
+                time_info = {}
 
             stats = {
                 "custom_event_total": len(calendar_store.events),
@@ -161,6 +174,26 @@ def register_web_apis(context, plugin) -> None:
                 "reminder_enabled": bool(_safe_group_config(config, "reminder").get("enable_reminder", False)),
                 "calendar_enabled": bool(_safe_group_config(config, "calendar").get("enable_calendar", False)),
                 "next_task_display": next_task_display,
+                # 时间感知面板字段（v1.7.0 新增）
+                "now_iso": time_info.get("now_iso", ""),
+                "now_display": time_info.get("now_display", ""),
+                "time_display": time_info.get("time_display", ""),
+                "tz_gmt": time_info.get("tz_gmt", ""),
+                "date_display": time_info.get("date_display", ""),
+                "greeting": time_info.get("greeting", ""),
+                "weekday_display": time_info.get("weekday_display", ""),
+                "workday_kind": time_info.get("workday_kind", "unknown"),
+                "workday_label": time_info.get("workday_label", ""),
+                "lunar_display": time_info.get("lunar_display", ""),
+                "lunar_year_chip": time_info.get("lunar_year_chip", ""),
+                "lunar_month_day": time_info.get("lunar_month_day", ""),
+                "almanac_display": time_info.get("almanac_display", ""),
+                "almanac_gz_day": time_info.get("almanac_gz_day", ""),
+                "almanac_chong_sha": time_info.get("almanac_chong_sha", ""),
+                "almanac_yi": time_info.get("almanac_yi", ""),
+                "almanac_ji": time_info.get("almanac_ji", ""),
+                "lunar_enabled": time_info.get("lunar_enabled", False),
+                "almanac_enabled": time_info.get("almanac_enabled", False),
             }
             return _ok(stats=stats)
         except Exception as e:

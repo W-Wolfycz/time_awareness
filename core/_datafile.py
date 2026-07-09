@@ -68,6 +68,9 @@ def load_mapping(path: str):
             with open(path, "r", encoding=encoding) as f:
                 data = yaml.load(f, Loader=_SafeLoader)
             break
+        except FileNotFoundError:
+            # 首次启动或新装插件时文件尚未创建——视为空数据，静默返回 None
+            return None
         except PermissionError:
             logger.error(f"{tag()} ❌ 文件读取权限不足: {path}")
             return None

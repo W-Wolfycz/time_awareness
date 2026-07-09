@@ -1,14 +1,13 @@
 """
 内置现实日历事件生成器
 
-按 6 个分类生成常用的现实日历事件：
+按 5 个分类生成常用的现实日历事件：
 
 - ``legal_holiday``：法定节假日（含调休），数据源 ``chinese_calendar`` 库
 - ``traditional``：传统农历节日（元宵、七夕、重阳、腊八、除夕等）
 - ``political``：政治纪念日（建党、建军、抗战胜利等，固定公历）
 - ``international``：国际/西方节日（情人节、圣诞节、母亲节、复活节等）
 - ``solar_term``：二十四节气
-- ``almanac``：黄历（每日干支/冲煞/宜忌，一年 365/366 条）
 
 设计要点：
 
@@ -19,8 +18,9 @@
   ``holiday_name``（连休场景下「先休后过节」也能正确归属）。
 - **节气跨年问题**：``Lunar.getJieQiTable`` 返回的表可能跨公历年（农历年跨公历），
   本模块改用 ``Solar.getLunar().getJieQi()`` 逐日判定，只取当年节气。
-- **黄历的量级**：与其他「特定日期事件」分类不同，黄历每日一条（365+ 条/年），
-  默认关闭，按需启用；text 截断宜/忌前 4 项避免过长。
+- **黄历已迁移**：v1.7.0 起，黄历（每日干支/宜忌）从本模块剥离到独立的
+  ``core/almanac_sensor.py``，走 ``<ALMANAC_STATE>`` 独立标签——避免一年 365 条
+  占用 ``builtin_events.yaml`` 并混入 ``<TODAY_EVENTS>`` 让 LLM 误以为今天"事件很多"。
 """
 
 import datetime
@@ -37,7 +37,6 @@ CATEGORY_TRADITIONAL = "traditional"
 CATEGORY_POLITICAL = "political"
 CATEGORY_INTERNATIONAL = "international"
 CATEGORY_SOLAR_TERM = "solar_term"
-CATEGORY_ALMANAC = "almanac"
 
 ALL_CATEGORIES = (
     CATEGORY_LEGAL,
@@ -45,7 +44,6 @@ ALL_CATEGORIES = (
     CATEGORY_POLITICAL,
     CATEGORY_INTERNATIONAL,
     CATEGORY_SOLAR_TERM,
-    CATEGORY_ALMANAC,
 )
 
 
@@ -335,42 +333,6 @@ def gen_solar_terms(year: int) -> list:
     return events
 
 
-def gen_almanac(year: int) -> list:
-    """生成黄历每日事件（一年 365/366 条）。
-
-    每日一条，包含干支日、冲煞（生肖+方位）、宜、忌。信息量较大但每日才
-    一条，注入 ``<TODAY_EVENTS>`` 标签时可控（约 40 字/天）。
-
-    - ``getDayInGanZhi()`` → 干支日（如 "辛未"）
-    - ``getDayChongShengXiao()`` → 冲的生肖（"牛" 比 "丑" 直观）
-    - ``getDaySha()`` → 煞方（"西"）
-    - ``getDayYi()`` / ``getDayJi()`` → 宜 / 忌列表（取前 4 项截断，避免 text 过长）
-    """
-    try:
-        from lunar_python import Solar
-    except ImportError:
-        logger.warning(f"{tag()} ⚠️ lunar_python 库未安装，跳过黄历生成")
-        return []
-
-    events = []
-    d = datetime.date(year, 1, 1)
-    end = datetime.date(year, 12, 31)
-    while d <= end:
-        solar = Solar.fromYmd(d.year, d.month, d.day)
-        lunar = solar.getLunar()
-        gz = lunar.getDayInGanZhi()
-        chong = lunar.getDayChongShengXiao()
-        sha = lunar.getDaySha()
-        yi = lunar.getDayYi()
-        ji = lunar.getDayJi()
-        yi_text = "、".join(yi[:4]) if yi else "无"
-        ji_text = "、".join(ji[:4]) if ji else "无"
-        text = f"黄历 {gz}日 冲{chong}煞{sha} 宜:{yi_text} 忌:{ji_text}"
-        events.append(_make_event(year, d.month, d.day, text, CATEGORY_ALMANAC))
-        d += datetime.timedelta(days=1)
-    return events
-
-
 def _find_solar_term_date(year: int, term_name: str) -> list:
     """返回 year 年 term_name 节气对应的公历日期列表（一般 1 个，闰节等情况可能多个）。"""
     try:
@@ -397,7 +359,6 @@ _GENERATORS = {
     CATEGORY_POLITICAL: gen_political,
     CATEGORY_INTERNATIONAL: gen_international,
     CATEGORY_SOLAR_TERM: gen_solar_terms,
-    CATEGORY_ALMANAC: gen_almanac,
 }
 
 
@@ -423,14 +384,13 @@ def generate_for_year(year: int, enabled_categories: list) -> list:
         except Exception as e:
             logger.error(f"{tag()} ❌ 内置[{cat}] 生成失败: {e}")
 
-    # 排序：月、日、分类优先级（法定 > 传统 > 节气 > 政治 > 国际 > 黄历）
+    # 排序：月、日、分类优先级（法定 > 传统 > 节气 > 政治 > 国际）
     priority = {
         CATEGORY_LEGAL: 0,
         CATEGORY_TRADITIONAL: 1,
         CATEGORY_SOLAR_TERM: 2,
         CATEGORY_POLITICAL: 3,
         CATEGORY_INTERNATIONAL: 4,
-        CATEGORY_ALMANAC: 5,
     }
     all_events.sort(key=lambda e: (e["month"], e["day"], priority.get(e["category"], 9), e["text"]))
 

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 from ..log import logger, tag
+from ..utils.time_utils import coerce_to_aware
 
 from ._datafile import atomic_write_yaml, load_mapping
 
@@ -359,7 +360,7 @@ class ReminderScheduler:
         """
         due = [
             t for t in self._tasks
-            if not t.sent and not t.given_up and t.fire_at <= now
+            if not t.sent and not t.given_up and coerce_to_aware(t.fire_at, now) <= now
         ]
         if not due:
             return []

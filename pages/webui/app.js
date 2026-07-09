@@ -76,6 +76,8 @@ async function waitBridgeReady() {
 // ==================== [3] view switcher ====================
 function switchView(name) {
   state.currentView = name;
+  // 离开 dashboard 时停止时钟（避免后台空跑 setInterval）
+  if (state.currentView !== 'dashboard') stopHeroClock();
   document.querySelectorAll('.nav-item').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.view === name);
   });
@@ -95,6 +97,16 @@ async function refreshCurrentView() {
 }
 
 // ==================== [4] render: dashboard ====================
+
+// 工作日性质 → chip 配色类名映射
+const WORKDAY_CHIP_CLASS = {
+  workday: 'workday-chip-workday',
+  weekend: 'workday-chip-weekend',
+  adjusted: 'workday-chip-adjusted',
+  holiday: 'workday-chip-holiday',
+  unknown: 'workday-chip-unknown',
+};
+
 async function renderDashboard() {
   const wrap = document.getElementById('dashboard-content');
   try {
@@ -103,7 +115,76 @@ async function renderDashboard() {
     state.stats = resp.stats;
 
     const s = state.stats;
-    wrap.innerHTML = `
+
+    // ---- Hero card：时间感知面板 ----
+    // GMT 时区尾巴（贴在主时间后下对齐；未配时区时为空）
+    const tzGmtHtml = s.tz_gmt
+      ? `<span class="hero-time-tz">${escapeHtml(s.tz_gmt)}</span>`
+      : '';
+    const chipClass = WORKDAY_CHIP_CLASS[s.workday_kind] || 'workday-chip-unknown';
+    // 工作日 chip 短文本：从 "工作日（周五）" 拆出 "工作日"
+    // weekday_display 已单独提供"周五"，chip 内只保留性质短语避免重复
+    const workdayShort = (s.workday_label || '').split('（')[0].trim() || (s.workday_label || '');
+    // 工作日 chip：开关关闭（workday_label 空）时不渲染
+    const workdayChipHtml = s.workday_label
+      ? `<span class="workday-chip ${chipClass}">${escapeHtml(workdayShort)}</span>`
+      : '';
+    // 农历年生肖 chip：未启用或异常时不渲染
+    const lunarYearChipHtml = s.lunar_year_chip
+      ? `<span class="lunar-year-chip">${escapeHtml(s.lunar_year_chip)}</span>`
+      : '';
+    // 农历月日：紧贴在 chip 后，前面不加逗号
+    const lunarMdHtml = s.lunar_month_day
+      ? `<span class="date-info-seg">${escapeHtml(s.lunar_month_day)}</span>`
+      : '';
+    // 周X：始终显示（除非后端字段缺失）
+    const weekdayHtml = s.weekday_display
+      ? `<span class="date-info-seg">${escapeHtml(s.weekday_display)}</span>`
+      : '';
+    // 黄历 chip 行：紧贴 date-info 下方（与农历同语义块）
+    // 拆 3 个 chip：📜干支冲煞（紫）/ 宜（绿）/ 忌（红）
+    // 任一字段为空则跳过该 chip；全部为空时不渲染整行
+    const almanacChips = [];
+    if (s.almanac_gz_day) {
+      const chong = s.almanac_chong_sha ? ` ${escapeHtml(s.almanac_chong_sha)}` : '';
+      almanacChips.push(
+        `<span class="almanac-chip almanac-chip-gz">📜 ${escapeHtml(s.almanac_gz_day)}${chong}</span>`
+      );
+    }
+    if (s.almanac_yi) {
+      almanacChips.push(
+        `<span class="almanac-chip almanac-chip-yi">宜 ${escapeHtml(s.almanac_yi)}</span>`
+      );
+    }
+    if (s.almanac_ji) {
+      almanacChips.push(
+        `<span class="almanac-chip almanac-chip-ji">忌 ${escapeHtml(s.almanac_ji)}</span>`
+      );
+    }
+    const almanacHtml = almanacChips.length
+      ? `<div class="dashboard-almanac-row">${almanacChips.join('')}</div>`
+      : '';
+
+    const heroHtml = `
+      <div class="dashboard-hero card">
+        <div class="hero-time">
+          <span class="hero-time-main">${escapeHtml(s.time_display || '--:--:--')}</span>${tzGmtHtml}
+        </div>
+        <div class="greeting">${escapeHtml(s.greeting || '')}</div>
+        <div class="date-info">
+          <span class="date-info-prefix">今天是</span>
+          <span class="date-info-seg">${escapeHtml(s.date_display || '')}</span>
+          ${lunarYearChipHtml}
+          ${lunarMdHtml}
+          ${weekdayHtml}
+          ${workdayChipHtml}
+        </div>
+        ${almanacHtml}
+      </div>
+    `;
+
+    // ---- 原 metrics-grid（统计卡片） ----
+    const metricsHtml = `
       <div class="metrics-grid">
         <div class="metric-card">
           <div class="metric-label">自定义事件总数</div>
@@ -113,7 +194,7 @@ async function renderDashboard() {
         <div class="metric-card">
           <div class="metric-label">内置事件总数</div>
           <div class="metric-value">${s.builtin_event_total}</div>
-          <div class="metric-sub">节日 / 节气 / 黄历</div>
+          <div class="metric-sub">节日 / 节气</div>
         </div>
         <div class="metric-card">
           <div class="metric-label">本月事件</div>
@@ -153,9 +234,51 @@ async function renderDashboard() {
         </div>
       </div>
     `;
+
+    wrap.innerHTML = heroHtml + metricsHtml;
+    // 启动 hero 时钟（每秒 tick 一次 time_display 字段，其他字段保持渲染时刻的值）
+    startHeroClock(s.time_display);
   } catch (e) {
+    stopHeroClock();
     wrap.innerHTML = `<div class="empty-state">⚠️ ${escapeHtml(e.message)}</div>`;
   }
+}
+
+// ==================== [4b] hero 时钟（轻量 setInterval，仅更新时间显示） ====================
+let _heroClockHandle = null;
+
+function stopHeroClock() {
+  if (_heroClockHandle) {
+    clearInterval(_heroClockHandle);
+    _heroClockHandle = null;
+  }
+}
+
+/**
+ * 从服务端 time_display（HH:MM:SS）起步，每秒 +1 推进时间。
+ * 不依赖浏览器时区——直接拿服务端给的字符串做整数累加，
+ * 这样插件配置时区与显示时区始终一致。
+ * DOM 不存在（用户切走 view）时自动停止。
+ */
+function startHeroClock(timeDisplay) {
+  stopHeroClock();
+  const m = String(timeDisplay || '').match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (!m) return;
+  let h = parseInt(m[1], 10);
+  let mi = parseInt(m[2], 10);
+  let s = parseInt(m[3], 10);
+  if (h > 23 || mi > 59 || s > 59) return;
+  const fmt = (n) => String(n).padStart(2, '0');
+  const tick = () => {
+    s += 1;
+    if (s >= 60) { s = 0; mi += 1; }
+    if (mi >= 60) { mi = 0; h += 1; }
+    if (h >= 24) { h = 0; }
+    const el = document.querySelector('.hero-time-main');
+    if (!el) { stopHeroClock(); return; }
+    el.textContent = `${fmt(h)}:${fmt(mi)}:${fmt(s)}`;
+  };
+  _heroClockHandle = setInterval(tick, 1000);
 }
 
 // ==================== [5] render: calendar 月视图 ====================

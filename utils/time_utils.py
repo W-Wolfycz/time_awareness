@@ -64,6 +64,27 @@ def get_now(config: dict, astrbot_config=None) -> datetime.datetime:
     return datetime.datetime.now()
 
 
+def coerce_to_aware(dt: datetime.datetime, reference: datetime.datetime) -> datetime.datetime:
+    """把 ``dt`` 的时区属性规整到与 ``reference`` 同性质，避免 aware/naive 比较报错。
+
+    场景：用户中途修改了时区配置——历史持久化的任务 ``fire_at`` 可能是 aware
+    （如 ``2026-07-03T09:00:00+08:00``），而当前 ``get_now()`` 返回 naive
+    （或反之），直接 ``<=`` / ``-`` 会抛 ``TypeError: can't compare offset-naive
+    and offset-aware datetimes``。
+
+    策略：``reference`` aware 时，把 naive 的 ``dt`` 视为同一本地时区（``replace(tzinfo=...)``）；
+    ``reference`` naive 时，把 aware 的 ``dt`` 剥离 tzinfo。同性质直接返回原值。
+
+    注意：这只是兜底——若 ``dt`` 与 ``reference`` 实际时区不同，规整后的"时刻"
+    仍可能差几小时。但用于"过期/未到期"判断足够准确。
+    """
+    if dt.tzinfo is None and reference.tzinfo is not None:
+        return dt.replace(tzinfo=reference.tzinfo)
+    if dt.tzinfo is not None and reference.tzinfo is None:
+        return dt.replace(tzinfo=None)
+    return dt
+
+
 def is_in_time_range(time_range: str, tz=None) -> bool:
     """检查当前时间是否在指定范围内。支持跨午夜（如 "22:00-8:00"）。"""
     try:

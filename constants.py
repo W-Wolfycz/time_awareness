@@ -7,14 +7,17 @@
 # ==================== 时间感知提示词 ====================
 
 # 静态时间引导规则——硬编码（用户不可在 webui 配置）。
-# 数据 XML 标签（<SCHEDULE_STATE> / <TODAY_EVENTS>）由代码注入到 user 消息末尾，
-# 规则文本仅作为 LLM 解读这些标签的指令；保持静态以命中 provider Prompt 缓存。
+# 数据 XML 标签（<SCHEDULE_STATE> / <WORKDAY_STATE> / <LUNAR_STATE> / <TODAY_EVENTS> /
+# <ALMANAC_STATE> / <LAST_CHAT>）由代码注入到 user 消息末尾，规则文本仅作为 LLM
+# 解读这些标签的指令；保持静态以命中 provider Prompt 缓存。
 DEFAULT_TIME_GUIDANCE_PROMPT = """<TIME_GUIDE>
 时间感知规则（必须严格遵守）：
-1. 真实性：下方 <SCHEDULE_STATE> 与 <TODAY_EVENTS>（如存在）是当前时间的唯一可信来源；其他时间细节也禁止编造或推测。<TODAY_EVENTS> 缺席即表示当日无特殊事项。
+1. 真实性：下方 <SCHEDULE_STATE> / <WORKDAY_STATE> / <LUNAR_STATE> / <TODAY_EVENTS> / <ALMANAC_STATE> / <LAST_CHAT>（如存在）是当前时间的唯一可信来源；其他时间细节也禁止编造或推测。<TODAY_EVENTS> 缺席即表示当日无特殊事项。
 2. 自然回应：优先使用自然口语（如"刚才"、"大半夜"、"好久不见"）替代数字报时，仅在用户明确询问时提供精确时间。
 3. 状态映射：参考 <SCHEDULE_STATE> 自然带入人设（不刻意强调数字）。值为「未指定」时按人设与时段常识自由演绎即可。
-4. 上下文 aware：参考对话历史的时间分布调整语气（多条消息间隔较长可表露想念，刚聊过则保持连贯）；<SCHEDULE_STATE> 内含 <SLEEP_MODE> 标签时按人设自然表现困意。
+4. 上下文 aware：参考 <LAST_CHAT>（如存在）的时间间隔调整语气——很久没聊可表露想念，刚刚还在聊则保持连贯；<SCHEDULE_STATE> 内含 <SLEEP_MODE> 标签时按人设自然表现困意。
+5. 日历性质：参考 <WORKDAY_STATE> 自然贴合——调休工作日（周末但需上班）可体谅辛苦，节假日可表庆祝，工作日早晨可鼓劲；不要直报"今天是工作日"这种数字陈述。
+6. 农历与黄历：参考 <LUNAR_STATE>（如存在）感知农历日期，对于传统节日/农事/生肖相关的人设可自然贴合；参考 <ALMANAC_STATE>（如存在）的宜忌信息，可酌情用作话题点缀或决策参考，不要逐条复述。
 </TIME_GUIDE>"""
 
 # ==================== AI 生成日历系统提示词 ====================

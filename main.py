@@ -38,7 +38,6 @@ from .constants import (
 )
 from .core.builtin_events import (
     ALL_CATEGORIES,
-    CATEGORY_ALMANAC,
     CATEGORY_LEGAL,
     CATEGORY_POLITICAL,
     CATEGORY_INTERNATIONAL,
@@ -48,7 +47,11 @@ from .core.builtin_events import (
 from .core.builtin_manager import BuiltinManager
 from .core.calendar_manager import CalendarManager
 from .core.calendar_store import REPEAT_FOREVER, REPEAT_NONE, calendar_store
+from .core.almanac_sensor import almanac_sensor
+from .core.last_chat_tracker import LastChatTracker
+from .core.lunar_sensor import lunar_sensor
 from .core.scheduler import DueGroup, ReminderScheduler
+from .core.workday_sensor import workday_sensor
 from .llm.calendar_generator import (
     DEFAULT_MAX_GENERATE,
     build_system_prompt,
@@ -90,6 +93,7 @@ class CalendarPlusPlugin(Star):
 
         self.calendar_manager = CalendarManager(self.data_dir)
         self.builtin_manager = BuiltinManager(self.data_dir)
+        self.last_chat_tracker = LastChatTracker(self.data_dir)
         # 调度器：trigger_callback 委托给 self._on_due；
         # now_provider 让 scheduler 用与 fire_at 同时区的 now（避免 aware/naive 比较报错）
         self.scheduler = ReminderScheduler(
@@ -106,8 +110,17 @@ class CalendarPlusPlugin(Star):
     async def initialize(self):
         """AstrBot 启动时调用：加载数据 + 启动调度。"""
         self.calendar_manager.load()
+        self.last_chat_tracker.load()
+
+        # v1.7.1 迁移：黄历配置统一到 time_awareness.almanac_enabled
+        # 历史位置 calendar.builtin_events.almanac（v1.6.0）/ calendar.almanac_enabled（v1.7.0）
+        # 启动时自动迁到新位置（紧邻农历配置）。AstrBot 加载 schema 后会剥离已删除字段，
+        # 但用户可能在配置文件里有残留——这里读 raw 字典兜底检测。
+        self._migrate_legacy_almanac_config()
 
         # 内置事件：跨年/分类开关变更时自动 regen
+        # 注：v1.7.0 后 almanac 不再在 builtin categories 内，旧 yaml 的
+        # enabled_categories 含 almanac，必然触发 stale，首次启动 regen 会自动清掉黄历条目
         try:
             now = get_now(self.config, self._astrbot_config())
             year = now.year
@@ -205,6 +218,44 @@ class CalendarPlusPlugin(Star):
         except Exception as e:
             logger.error(f"{tag()} ❌ 内置事件跨年 regen 失败: {e}")
 
+    def _migrate_legacy_almanac_config(self) -> None:
+        """把旧的黄历配置位置自动迁移到 ``time_awareness.almanac_enabled``。
+
+        AstrBot 加载 schema 时会剥离已删除字段，但用户磁盘配置可能仍有残留——
+        这里从 ``self.config`` 读残留值，检测到旧位置为 true 且新位置未启用时
+        自动启用并落盘。
+
+        幂等：已迁移过或无旧配置时不做任何事。
+        """
+        try:
+            ta = self.config.get("time_awareness", {})
+            if not isinstance(ta, dict):
+                ta = {}
+                self.config["time_awareness"] = ta
+            if bool(ta.get("almanac_enabled", False)):
+                return  # 新开关已启用——无需迁移
+
+            legacy_sources = []
+            cal = self.config.get("calendar", {})
+            if isinstance(cal, dict):
+                be = cal.get("builtin_events", {})
+                if isinstance(be, dict) and be.get("almanac", False):
+                    legacy_sources.append("calendar.builtin_events.almanac")
+                if cal.get("almanac_enabled", False):
+                    legacy_sources.append("calendar.almanac_enabled")
+
+            if not legacy_sources:
+                return
+
+            ta["almanac_enabled"] = True
+            self._try_save_config()
+            logger.info(
+                f"{tag()} 🔄 检测到旧黄历配置 {' / '.join(legacy_sources)}=true，"
+                f"已自动迁移到 time_awareness.almanac_enabled=true"
+            )
+        except Exception as e:
+            logger.warning(f"{tag()} ⚠️ almanac 配置迁移失败（不致命）: {e}")
+
     # ==================== 提醒配置 ====================
 
     def _apply_reminder_config(self) -> None:
@@ -282,7 +333,7 @@ class CalendarPlusPlugin(Star):
         # 静态规则 + 动态数据：让缓存前缀最大化（前段稳定，末段新生）
         if self._time_guidance_enabled():
             system_parts.append(DEFAULT_TIME_GUIDANCE_PROMPT)
-            system_parts.append(self._build_dynamic_time_data())
+            system_parts.append(self._build_dynamic_time_data(session=session))
 
         system_prompt = "\n\n".join(system_parts)
         logger.debug(
@@ -408,6 +459,17 @@ class CalendarPlusPlugin(Star):
 
             if processed:
                 await self.context.send_message(session, MessageChain(chain=processed))
+
+            # 主动消息不经 event 调度链，after_message_sent 钩子不会触发——
+            # 这里显式记录 AI 发送时间，否则下一轮 LAST_CHAT 的 AI 时间会停留在
+            # 最后一次正常对话（可能几小时前），让 LLM 误以为"很久没聊"
+            if self._last_chat_enabled():
+                try:
+                    self.last_chat_tracker.record_ai(
+                        session, get_now(self.config, self._astrbot_config())
+                    )
+                except Exception as e:
+                    logger.warning(f"{tag()} ⚠️ 主动消息 record_ai 失败 session={session}: {e}")
 
             logger.info(
                 f"{tag()} ✅ LLM 触发已发: session={session} tasks={len(tasks)} "
@@ -554,21 +616,93 @@ class CalendarPlusPlugin(Star):
         """时间引导总开关（仅控制注入与否；规则文本与数据格式硬编码在 constants）。"""
         return bool(self.config.get("time_awareness", {}).get("time_guidance_enabled", True))
 
-    def _build_dynamic_time_data(self) -> str:
-        """动态时间数据：当前时段状态 + 当日事项，XML 标签包裹。
+    def _build_dynamic_time_data(self, session: str | None = None) -> str:
+        """动态时间数据：时段状态 + 工作日性质 + 农历 + 当日事项 + 黄历 + 上次对话时间。
 
-        - ``<SCHEDULE_STATE>`` 总是输出（rule 3 显式处理「未指定」语义）
-        - ``<TODAY_EVENTS>`` 仅在有事项时输出；空时省略标签，让 LLM 从缺失推断「今日无特殊事件」
+        所有标签受 ``time_guidance_enabled`` 总开关约束（关掉则不调本方法）；
+        子标签各自有独立开关。
 
-        正常对话路径：作为 ``extra_user_content_parts`` 注入到当前轮 user 消息末尾。
-        主动消息路径：拼到 system_prompt 末尾（无 extra_user_content_parts 入口）。
+        - ``<SCHEDULE_STATE>``：总是输出（rule 3 显式处理「未指定」语义）
+        - ``<WORKDAY_STATE>``：受 ``workday_state_enabled`` 控制；总是有值（chinese_calendar
+          未覆盖年份时降级为「周X」）
+        - ``<LUNAR_STATE>``：受 ``lunar_state_enabled`` 控制；``lunar_python`` 异常时省略
+        - ``<TODAY_EVENTS>``：仅在有事项时输出；空时省略，让 LLM 从缺失推断「今日无特殊事件」
+        - ``<ALMANAC_STATE>``：受 ``time_awareness.almanac_enabled`` 控制；``lunar_python`` 异常时省略
+          （v1.7.0 从 ``<TODAY_EVENTS>`` 中分离，避免一年 365 条占用事件清单）
+        - ``<LAST_CHAT>``：受 ``last_chat_enabled`` 控制；首次对话无记录时省略
+
+        Args:
+            session: ``unified_msg_origin``。正常对话路径由 ``inject_time_context``
+                     传入；主动消息路径由 ``_fire_with_llm`` 传入。
         """
-        state = self._resolve_schedule_state()
+        parts = [f"<SCHEDULE_STATE>{self._resolve_schedule_state()}</SCHEDULE_STATE>"]
+
+        if self._workday_enabled():
+            parts.append(f"<WORKDAY_STATE>{self._workday_label()}</WORKDAY_STATE>")
+
+        if self._lunar_enabled():
+            lunar_text = self._lunar_label()
+            if lunar_text:
+                parts.append(f"<LUNAR_STATE>{lunar_text}</LUNAR_STATE>")
+
+        # 黄历紧贴农历（同为日历性质元信息），故 ALMANAC_STATE 排在 LUNAR_STATE 之后
+        almanac = self._render_almanac()
+        if almanac:
+            parts.append(almanac)
+
         events = self._today_events_text()
-        parts = [f"<SCHEDULE_STATE>{state}</SCHEDULE_STATE>"]
         if events:
             parts.append(f"<TODAY_EVENTS>{events}</TODAY_EVENTS>")
+
+        last_chat = self._render_last_chat(session)
+        if last_chat:
+            parts.append(last_chat)
+
         return "\n".join(parts)
+
+    def _workday_label(self) -> str:
+        now = get_now(self.config, self._astrbot_config())
+        _, label = workday_sensor.classify(now.date())
+        return label
+
+    def _lunar_label(self) -> str:
+        now = get_now(self.config, self._astrbot_config())
+        return lunar_sensor.describe(now.date())
+
+    def _render_almanac(self) -> str:
+        """返回 ``<ALMANAC_STATE>...</ALMANAC_STATE>`` 或空串。
+
+        空串场景：开关关闭 / ``lunar_python`` 未安装 / 计算异常。
+        """
+        if not self._almanac_enabled():
+            return ""
+        now = get_now(self.config, self._astrbot_config())
+        text = almanac_sensor.describe(now.date())
+        return f"<ALMANAC_STATE>{text}</ALMANAC_STATE>" if text else ""
+
+    def _render_last_chat(self, session: str | None) -> str:
+        """返回 ``<LAST_CHAT>...</LAST_CHAT>`` 或空串。
+
+        空串场景：开关关闭 / 无 session / 该会话无任何历史记录。
+        """
+        if not self._last_chat_enabled() or not session:
+            return ""
+        summary = self.last_chat_tracker.summary(
+            session, get_now(self.config, self._astrbot_config())
+        )
+        return f"<LAST_CHAT>{summary}</LAST_CHAT>" if summary else ""
+
+    def _workday_enabled(self) -> bool:
+        return bool(self.config.get("time_awareness", {}).get("workday_state_enabled", True))
+
+    def _lunar_enabled(self) -> bool:
+        return bool(self.config.get("time_awareness", {}).get("lunar_state_enabled", True))
+
+    def _almanac_enabled(self) -> bool:
+        return bool(self.config.get("time_awareness", {}).get("almanac_enabled", False))
+
+    def _last_chat_enabled(self) -> bool:
+        return bool(self.config.get("time_awareness", {}).get("last_chat_enabled", True))
 
     def _today_events_text(self) -> str:
         """当日事项文本：按「、」拼接；无事项返回空串（由调用方决定是否省略 XML 标签）。"""
@@ -579,6 +713,102 @@ class CalendarPlusPlugin(Star):
         include_builtin = cal.get("enable_builtin_events", True) and bool(self._enabled_builtin_categories())
         return calendar_store.today_text(now, include_builtin=include_builtin)
 
+    # ==================== Dashboard 时间感知面板 ====================
+
+    _WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+    def build_dashboard_time_info(self) -> dict:
+        """组装 dashboard 顶部时间感知面板所需数据（供 ``web_api /dashboard/stats`` 调用）。
+
+        所有字段在异常时降级为空串/默认值，确保前端不崩。
+        返回字典字段：
+
+        - ``now_iso`` / ``now_display`` / ``time_display`` / ``date_display``：当前时间多种格式
+        - ``greeting``：时段问候语（早上/上午/中午/下午/傍晚/晚上/深夜/凌晨 好~）
+        - ``weekday_display``：周X
+        - ``workday_kind`` / ``workday_label``：工作日性质（chip 配色用 kind）
+        - ``lunar_display`` / ``almanac_display``：农历/黄历文本（关闭或异常时为空）
+        - ``lunar_year_chip`` / ``lunar_month_day``：WebUI 用的农历拆分字段
+          （"丙午🐴年" / "五月廿六"）；lunar 关闭时两字段为空
+        - ``lunar_enabled`` / ``almanac_enabled``：开关状态
+        """
+        now = get_now(self.config, self._astrbot_config())
+        date = now.date()
+
+        # 时区 GMT 偏移（naive now / 未配时区时为空，前端不渲染尾巴）
+        offset = now.utcoffset()
+        if offset is not None:
+            total_min = int(offset.total_seconds() // 60)
+            sign = "+" if total_min >= 0 else "-"
+            m = abs(total_min)
+            tz_gmt = f"GMT{sign}{m // 60:02d}:{m % 60:02d}"
+        else:
+            tz_gmt = ""
+
+        # 问候语：基于小时分段
+        hour = now.hour
+        if 5 <= hour < 8:
+            greeting = "早上好~"
+        elif 8 <= hour < 11:
+            greeting = "上午好~"
+        elif 11 <= hour < 13:
+            greeting = "中午好~"
+        elif 13 <= hour < 17:
+            greeting = "下午好~"
+        elif 17 <= hour < 19:
+            greeting = "傍晚好~"
+        elif 19 <= hour < 23:
+            greeting = "晚上好~"
+        elif hour >= 23 or hour < 2:
+            greeting = "深夜好~"
+        else:
+            greeting = "凌晨好~"  # 2-5
+
+        # 工作日性质：受 workday_state_enabled 控制——关闭时返回空，UI 不渲染 chip
+        if self._workday_enabled():
+            workday_kind, workday_label = workday_sensor.classify(date)
+        else:
+            workday_kind, workday_label = "", ""
+
+        # 农历：LLM 注入用 describe()，WebUI 用 describe_detailed()
+        lunar_display = lunar_sensor.describe(date) if self._lunar_enabled() else ""
+        lunar_detail = (
+            lunar_sensor.describe_detailed(date) if self._lunar_enabled()
+            else {"lunar_year_chip": "", "lunar_month_day": ""}
+        )
+
+        # 黄历：LLM 注入用 describe()，WebUI 用 describe_detailed() 拆 chip
+        almanac_display = almanac_sensor.describe(date) if self._almanac_enabled() else ""
+        almanac_detail = (
+            almanac_sensor.describe_detailed(date) if self._almanac_enabled()
+            else {"gz_day": "", "chong_sha": "", "yi": "", "ji": ""}
+        )
+
+        # 周X（date.weekday() 周一=0）
+        weekday_cn = self._WEEKDAY_CN[date.weekday()] if 0 <= date.weekday() < 7 else ""
+
+        return {
+            "now_iso": now.isoformat(),
+            "now_display": now.strftime("%Y/%m/%d %H:%M:%S"),
+            "time_display": now.strftime("%H:%M:%S"),
+            "tz_gmt": tz_gmt,
+            "date_display": now.strftime("%Y/%m/%d"),
+            "greeting": greeting,
+            "weekday_display": weekday_cn,
+            "workday_kind": workday_kind,
+            "workday_label": workday_label,
+            "lunar_display": lunar_display,
+            "lunar_year_chip": lunar_detail.get("lunar_year_chip", ""),
+            "lunar_month_day": lunar_detail.get("lunar_month_day", ""),
+            "almanac_display": almanac_display,
+            "almanac_gz_day": almanac_detail.get("gz_day", ""),
+            "almanac_chong_sha": almanac_detail.get("chong_sha", ""),
+            "almanac_yi": almanac_detail.get("yi", ""),
+            "almanac_ji": almanac_detail.get("ji", ""),
+            "lunar_enabled": self._lunar_enabled(),
+            "almanac_enabled": self._almanac_enabled(),
+        }
+
     # ==================== 内置日历事件 ====================
 
     def _enabled_builtin_categories(self) -> list:
@@ -586,6 +816,9 @@ class CalendarPlusPlugin(Star):
 
         受总开关 ``calendar.enable_builtin_events`` 与各分类子开关共同控制。
         5 类开关位于 ``calendar.builtin_events`` 子组。
+
+        注意：黄历（v1.7.0 前 ``almanac`` 子项，v1.7.0 ``calendar.almanac_enabled``）已迁移到 ``time_awareness.almanac_enabled``
+        顶层开关，走独立 ``<ALMANAC_STATE>`` 标签，不再在此处返回。
         """
         cal = self.config.get("calendar", {})
         if not cal.get("enable_builtin_events", True):
@@ -602,8 +835,6 @@ class CalendarPlusPlugin(Star):
             result.append(CATEGORY_POLITICAL)
         if be.get("international", False):
             result.append(CATEGORY_INTERNATIONAL)
-        if be.get("almanac", False):
-            result.append(CATEGORY_ALMANAC)
         return result
 
     def _resolve_schedule_state(self) -> str:
@@ -698,7 +929,8 @@ class CalendarPlusPlugin(Star):
 
         - 静态规则 ``DEFAULT_TIME_GUIDANCE_PROMPT`` → ``req.system_prompt`` 末尾。
           system_prompt 永远字节稳定（除了规则文本就是 persona），命中 provider Prompt 缓存。
-        - 动态数据（``<SCHEDULE_STATE>`` + ``<TODAY_EVENTS>``）→ ``req.extra_user_content_parts``，
+        - 动态数据（``<SCHEDULE_STATE>`` + ``<WORKDAY_STATE>`` + ``<TODAY_EVENTS>`` +
+          ``<LAST_CHAT>``）→ ``req.extra_user_content_parts``，
           ``mark_as_temp()`` 标记后历史持久化时被剥掉，下一轮历史里消失。
 
         动态数据本质上只是"当前态"信息，不需要在历史里累积；persona + 静态规则在
@@ -712,10 +944,45 @@ class CalendarPlusPlugin(Star):
             req.system_prompt = (
                 f"{existing.rstrip()}\n\n{rules}" if existing else rules
             )
-            dyn = self._build_dynamic_time_data()
+            # 记录用户消息时间——on_llm_request 天然过滤命令（命令不调 LLM）。
+            # 单独 try：record 失败不应影响 dyn 注入（否则 LLM 这次完全没时间感知）
+            umo = event.unified_msg_origin
+            if self._last_chat_enabled() and umo:
+                try:
+                    self.last_chat_tracker.record_user(
+                        umo, get_now(self.config, self._astrbot_config())
+                    )
+                except Exception as e:
+                    logger.warning(f"{tag(event)} ⚠️ record_user 失败: {e}")
+            dyn = self._build_dynamic_time_data(session=umo)
             req.extra_user_content_parts.append(TextPart(text=dyn).mark_as_temp())
         except Exception as e:
             logger.error(f"{tag(event)} ❌ on_llm_request 注入失败: {e}")
+
+    @filter.after_message_sent()
+    async def _record_ai_sent_time(self, event: AstrMessageEvent):
+        """AI 发送消息后记录时间——用于 ``<LAST_CHAT>`` 标签。
+
+        命令消息（以 ``/`` 开头）不计入：避免 ``/calendar show`` 这类管理操作被
+        误判为「聊天」。``after_message_sent`` 在 LLM 失败时不触发，这是预期行为。
+        """
+        if not self._last_chat_enabled():
+            return
+        try:
+            original = getattr(event.message_obj, "message_str", "") or ""
+            if original.strip().startswith("/"):
+                return
+        except Exception:
+            pass
+        try:
+            umo = event.unified_msg_origin
+            if not umo:
+                return
+            self.last_chat_tracker.record_ai(
+                umo, get_now(self.config, self._astrbot_config())
+            )
+        except Exception as e:
+            logger.warning(f"{tag(event)} ⚠️ 记录 AI 发送时间失败: {e}")
 
     # ==================== 命令树 ====================
 
@@ -735,7 +1002,7 @@ class CalendarPlusPlugin(Star):
             "/calendar export  — 输出当前数据为 YAML（管理员）\n"
             "/calendar import  — 回复一条 YAML 文本批量导入（管理员）\n"
             "/calendar builtin_regen  — 重新生成当年内置现实事件（管理员）\n"
-            "/calendar builtin_list [分类]  — 列出当年所有内置事件（可按「法定/传统/节气/政治/国际/黄历」过滤）\n"
+            "/calendar builtin_list [分类]  — 列出当年所有内置事件（可按「法定/传统/节气/政治/国际」过滤）\n"
             "/calendar help  — 显示本帮助\n"
             "\n"
             "日期格式：\n"
@@ -752,9 +1019,10 @@ class CalendarPlusPlugin(Star):
             "/calendar add 06-24 9 每年生日\n"
             "/calendar del abc12345  — 按 id 删除用户事件\n"
             "\n"
-            "内置现实日历事件（默认开法定/传统/节气，关政治/国际/黄历）：\n"
+            "内置现实日历事件（默认开法定/传统/节气，关政治/国际）：\n"
             "- 法定节假日（含调休）、传统农历节日、二十四节气\n"
-            "- 政治纪念日、国际/西方节日、黄历（每日干支/宜忌）\n"
+            "- 政治纪念日、国际/西方节日\n"
+            "- 黄历开关已迁到 time_awareness.almanac_enabled（v1.7.1，紧邻农历配置）\n"
             "- 跨年自动重新生成\n"
             "\n"
             "主动提醒（reminder 配置启用后）：\n"
@@ -1032,7 +1300,6 @@ class CalendarPlusPlugin(Star):
         /calendar builtin_list 节气      — 仅列出二十四节气
         /calendar builtin_list 政治      — 仅列出政治纪念日
         /calendar builtin_list 国际      — 仅列出国际/西方节日
-        /calendar builtin_list 黄历      — 仅列出每日黄历
         """
         now = get_now(self.config, self._astrbot_config())
         builtin_data = self.builtin_manager.load_raw()
@@ -1073,7 +1340,6 @@ class CalendarPlusPlugin(Star):
             "政治": CATEGORY_POLITICAL, "政治纪念": CATEGORY_POLITICAL, "political": CATEGORY_POLITICAL,
             "国际": CATEGORY_INTERNATIONAL, "international": CATEGORY_INTERNATIONAL,
             "西方": CATEGORY_INTERNATIONAL,
-            "黄历": CATEGORY_ALMANAC, "老黄历": CATEGORY_ALMANAC, "almanac": CATEGORY_ALMANAC,
         }
         return mapping.get(text.lower(), "")
 
@@ -1443,7 +1709,6 @@ class CalendarPlusPlugin(Star):
             CATEGORY_SOLAR_TERM: "节气",
             CATEGORY_POLITICAL: "政治",
             CATEGORY_INTERNATIONAL: "国际",
-            CATEGORY_ALMANAC: "黄历",
         }.get(category, "内")
 
     def _find_event_by_short_id(self, short: str) -> dict | None:

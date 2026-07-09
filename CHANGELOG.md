@@ -1,5 +1,40 @@
 # 更新日志
 
+## 1.7.0
+2026-07-10
+
+### 新增
+- **农历日期感知**：注入 `<LUNAR_STATE>` 标签告知今日农历日期，让传统节日/农事/生肖相关人设更贴合
+- **黄历感知**：注入 `<ALMANAC_STATE>` 标签（干支/冲煞/宜忌），与农历一同启用语义最佳
+- **WebUI 仪表盘时间感知面板**：概览页顶部 hero card——大字当前时间 + 时段问候语 + 日期行（含工作日彩色 chip + 农历年生肖 chip）+ 黄历 chip 行
+
+### 配置
+- `time_awareness` 组新增 `lunar_state_enabled` / `almanac_enabled`（默认分别开/关），集中在「时间感知」分组下
+- 规则文本加 `<LUNAR_STATE>` / `<ALMANAC_STATE>` 标签清单与对应规则
+
+### 文件结构
+- 新增 `core/almanac_sensor.py` / `core/lunar_sensor.py`：实时计算，无状态无需 regen
+
+## 1.6.0
+2026-07-08
+
+### 新增
+- **工作日性质感知**：注入 `<WORKDAY_STATE>` 标签，标注今天是工作日/周末/调休工作日/节假日。让 LLM 能区分「周六」与「调休后要上班的周六」，自然体谅调休辛苦。基于 `chinese_calendar` 实时判定，无状态无需 regen
+- **上次对话时间感知**：注入 `<LAST_CHAT>` 标签，告知 LLM 距上次用户发言/AI 回复的相对时间（如「用户 5 分钟前 · AI 3 分钟前」）。让 LLM 能基于间隔自然表达想念或保持连贯。数据自维护持久化，不依赖 chat_memory 等其他插件；命令消息不计入
+
+### 配置
+- `time_awareness` 组新增 `workday_state_enabled`（默认开）
+- `time_awareness` 组新增 `last_chat_enabled`（默认开）
+- 两者均受 `time_guidance_enabled` 总开关约束
+
+### 规则文本更新
+- `DEFAULT_TIME_GUIDANCE_PROMPT` 规则 1 列举所有可能出现的 XML 标签
+- 规则 4 显式引用 `<LAST_CHAT>` 调整想念/连贯语气
+- 新增规则 5：参考 `<WORKDAY_STATE>` 自然贴合日历性质（调休体谅、节假日庆祝），不直报数字
+
+### 数据文件
+- 新增 `data/plugin_data/time_awareness/last_chat_times.yaml`：记录每个会话的用户/AI 上次发言时间
+
 ## 1.5.1
 2026-07-05
 
