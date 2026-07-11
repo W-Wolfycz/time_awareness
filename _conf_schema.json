@@ -88,7 +88,7 @@
                                 "description": "💬 状态描述(<SCHEDULE_STATE>)",
                                 "type": "text",
                                 "default": "",
-                                "hint": "命中此时段时填入 <SCHEDULE_STATE> 标签的文本。建议 50-200 字，描述角色的生理/情绪/语气状态，不改写人设核心。可使用XML例如 <SLEEP_MODE>...</SLEEP_MODE>"
+                                "hint": "命中此时段时填入 <SCHEDULE_STATE> 标签的文本。建议 50-200 字，直接描述此时段的生理/情绪/语气状态，不改写人设核心。不需要加 XML 包裹"
                             }
                         }
                     },
@@ -117,8 +117,8 @@
                             "state_prompt": {
                                 "description": "💬 状态描述(<SCHEDULE_STATE>)",
                                 "type": "text",
-                                "default": "<SLEEP_MODE>\n当前是睡眠时段，你刚被消息叫醒或正在半梦半醒之间。请按人设自然回应——可带困意、含糊、迟疑、不情愿，但不要拒对不起对话；允许偶尔走神、把话说半句、打哈欠。\n</SLEEP_MODE>",
-                                "hint": "命中此时段时填入 <SCHEDULE_STATE> 标签的文本。建议 50-200 字，描述角色的生理/情绪/语气状态，不改写人设核心。可使用XML例如 <SLEEP_MODE>...</SLEEP_MODE>"
+                                "default": "刚被消息叫醒或正在半梦半醒之间。按人设自然回应——可带困意、含糊、迟疑、不情愿，但不拒绝对话；允许偶尔走神、把话说半句、打哈欠。",
+                                "hint": "命中此时段时填入 <SCHEDULE_STATE> 标签的文本。建议 50-200 字，直接描述此时段的生理/情绪/语气状态，不改写人设核心。不需要加 XML 包裹"
                             }
                         }
                     }
