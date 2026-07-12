@@ -236,6 +236,12 @@
                 "default": "09:00",
                 "hint": "格式 HH:MM（24 小时制）。每日 0 点扫描当日全部日历事件，在此时刻合并发到白名单会话"
             },
+            "daily_greeting_without_events": {
+                "description": "💬 无事件也发问候",
+                "type": "bool",
+                "default": false,
+                "hint": "当日没有任何日历事件时，仍在 reminder_time 时刻主动发一条日常问候（打招呼）。关闭则无事件就跳过不发"
+            },
             "reminder_max_late_minutes": {
                 "description": "⏳ 迟到容忍窗口（分钟）",
                 "type": "int",

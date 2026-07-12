@@ -12,7 +12,7 @@
 - **AI 日历生成**：用户给一个世界观/主题，LLM 一次性生成一整年日历事项
 - **现实日历事件**：法定节假日（含调休）/ 传统农历节日 / 二十四节气 / 政治纪念日 / 国际西方节日
 - **黄历感知（独立标签）**：每日干支 / 冲煞 / 宜忌，走独立 `<ALMANAC_STATE>` 标签，不混入事件清单
-- **主动提醒**：当日事项在指定时刻主动发到白名单会话；LLM 可通过 `schedule_followup` 工具自行安排后续主动消息；WebUI 可手动添加一次性任务
+- **主动提醒**：当日事项在指定时刻主动发到白名单会话；可选「无事件也发日常问候」；LLM 可通过 `schedule_followup` 工具自行安排后续主动消息；WebUI 可手动添加一次性任务
 - **Plugin Pages WebUI**：AstrBot 主 webui 侧边栏点开即用，含概览（时间感知 hero 面板）/ 日历月视图 / 任务列表
 
 ## 安装
@@ -75,6 +75,7 @@
 | `enable_reminder` | 启用主动提醒 | false |
 | `reminder_targets` | 提醒目标会话白名单 UMO（每行一个完整字符串） | [] |
 | `reminder_time` | 当日事项发送时刻（HH:MM） | `09:00` |
+| `daily_greeting_without_events` | 当日无事件也发日常问候 | false |
 | `reminder_max_late_minutes` | 迟到容忍窗口（分钟，超出则丢弃） | 60 |
 | `reminder_late_prompt` | 补发时附加的迟到提示词 | 内置默认 |
 | `followup_tool_enabled` | 向 LLM 注册 `schedule_followup` 工具 | true |

@@ -277,6 +277,10 @@ class CalendarPlusPlugin(Star):
         text = (self.config.get("reminder", {}).get("reminder_late_prompt") or "").strip()
         return text or DEFAULT_LATE_PROMPT
 
+    def _daily_greeting_without_events(self) -> bool:
+        """无事件也发问候（开启后，calendar 触发但当日无事件时仍发一条打招呼）。"""
+        return bool(self.config.get("reminder", {}).get("daily_greeting_without_events", False))
+
     # ==================== 调度回调 ====================
 
     async def _on_due(self, group: DueGroup) -> None:
@@ -362,6 +366,8 @@ class CalendarPlusPlugin(Star):
                 )
                 if texts:
                     parts.append(f"今天是 {'、'.join(texts)}，可自然提一下")
+                elif self._daily_greeting_without_events():
+                    parts.append("到点了，主动发一条贴合此时段的日常问候，自然开启对话")
             elif t.kind == "followup":
                 hint_preview = (t.hint or "(无承诺内容)")[:80]
                 logger.info(
