@@ -2,7 +2,7 @@
 时间表（日历事项）管理器
 
 负责 ``calendar_data.yaml`` 的读写、事项 CRUD、批量清除、导入/导出与校验。
-读写完成后回填 ``calendar_store`` 单例，供 ``<TODAY_EVENTS>`` 标签注入使用。
+读写完成后回填注入的 ``CalendarStore`` 实例，供 ``<TODAY_EVENTS>`` 标签注入使用。
 
 数据文件位于插件数据目录（``StarTools.get_data_dir``），全局共享一份时间表
 （不区分会话）。历史 ``calendar_data.json`` 会在首次加载时自动迁移为 YAML
@@ -25,6 +25,7 @@ from ._datafile import (
 from .calendar_store import (
     MAX_EVENT_TEXT_LENGTH,
     MAX_EVENTS,
+    CalendarStore,
     calendar_store,
     normalize_repeat,
     valid_month_day,
@@ -44,8 +45,9 @@ class CalendarManager:
     直接接收数据目录字符串而非 persistence_manager 对象，避免对其他系统产生耦合。
     """
 
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, store: CalendarStore | None = None):
         self.data_dir = data_dir
+        self.store = store or calendar_store
 
     # ==================== 路径 ====================
 
@@ -127,7 +129,7 @@ class CalendarManager:
             migrate_json_to_yaml(self._legacy_calendar_file_path(), calendar_file)
 
             if not os.path.exists(calendar_file):
-                calendar_store.set_events([])
+                self.store.set_events([])
                 logger.info(f"{tag()} ℹ️ 暂无时间表数据文件（首次运行）")
                 return
 
@@ -136,7 +138,7 @@ class CalendarManager:
                 return
 
             events = self._normalize_events(data.get("events", []))
-            calendar_store.set_events(events)
+            self.store.set_events(events)
             logger.info(f"{tag()} ✅ 已加载 {len(events)} 条时间表事项")
         except (FileNotFoundError, OSError) as e:
             logger.warning(f"{tag()} ⚠️ 时间表加载失败: {e}")
@@ -162,20 +164,20 @@ class CalendarManager:
         return {
             "version": CALENDAR_DATA_VERSION,
             "last_update": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "events": list(calendar_store.events),
+            "events": list(self.store.events),
         }
 
     # ==================== 查询 ====================
 
     def get_events(self) -> list:
         """返回全部事项（内存副本）。"""
-        return list(calendar_store.events)
+        return list(self.store.events)
 
     # ==================== CRUD ====================
 
     def add_event(self, raw: dict) -> dict | None:
         """新增一条事项；成功返回创建后的事项，失败返回 None。"""
-        if len(calendar_store.events) >= MAX_EVENTS:
+        if len(self.store.events) >= MAX_EVENTS:
             logger.warning(f"{tag()} ⚠️ 时间表事项已达上限 {MAX_EVENTS}，拒绝新增")
             return None
         payload = dict(raw or {})
@@ -183,9 +185,9 @@ class CalendarManager:
         event = self.normalize_event(payload)
         if event is None:
             return None
-        calendar_store.events.append(event)
+        self.store.events.append(event)
         if not self.save():
-            calendar_store.events.pop()
+            self.store.events.pop()
             return None
         return event
 
@@ -194,17 +196,17 @@ class CalendarManager:
         event_id = str(event_id or "").strip()
         if not event_id:
             return None
-        for idx, existing in enumerate(calendar_store.events):
+        for idx, existing in enumerate(self.store.events):
             if existing.get("id") == event_id:
                 payload = dict(raw or {})
                 payload["id"] = event_id
                 event = self.normalize_event(payload)
                 if event is None:
                     return None
-                original = calendar_store.events[idx]
-                calendar_store.events[idx] = event
+                original = self.store.events[idx]
+                self.store.events[idx] = event
                 if not self.save():
-                    calendar_store.events[idx] = original
+                    self.store.events[idx] = original
                     return None
                 return event
         return None
@@ -214,11 +216,11 @@ class CalendarManager:
         event_id = str(event_id or "").strip()
         if not event_id:
             return False
-        for idx, existing in enumerate(calendar_store.events):
+        for idx, existing in enumerate(self.store.events):
             if existing.get("id") == event_id:
-                removed = calendar_store.events.pop(idx)
+                removed = self.store.events.pop(idx)
                 if not self.save():
-                    calendar_store.events.insert(idx, removed)
+                    self.store.events.insert(idx, removed)
                     return False
                 return True
         return False
@@ -236,7 +238,7 @@ class CalendarManager:
         Returns:
             被删除的事项数量（保存失败时返回 0 且不改动）。
         """
-        before = calendar_store.events
+        before = self.store.events
         if scope == "all":
             kept = []
         elif scope == "year" and year is not None:
@@ -255,9 +257,9 @@ class CalendarManager:
         if removed_count <= 0:
             return 0
 
-        calendar_store.set_events(kept)
+        self.store.set_events(kept)
         if not self.save():
-            calendar_store.set_events(before)
+            self.store.set_events(before)
             return 0
         return removed_count
 
@@ -275,7 +277,7 @@ class CalendarManager:
                     "text": e.get("text"),
                     "repeat": e.get("repeat"),
                 }
-                for e in calendar_store.events
+                for e in self.store.events
             ],
         }
         return dump_yaml_str(payload, header="time_awareness 时间表导出文件（YAML）")
@@ -313,7 +315,7 @@ class CalendarManager:
         for event in incoming:
             event["id"] = uuid.uuid4().hex
 
-        before = calendar_store.events
+        before = self.store.events
         if mode == "replace":
             merged = incoming
         else:
@@ -322,8 +324,8 @@ class CalendarManager:
                 merged = merged[:MAX_EVENTS]
                 logger.warning(f"{tag()} ⚠️ 导入后超过上限 {MAX_EVENTS}，已截断")
 
-        calendar_store.set_events(merged)
+        self.store.set_events(merged)
         if not self.save():
-            calendar_store.set_events(before)
+            self.store.set_events(before)
             return -1
         return len(incoming)

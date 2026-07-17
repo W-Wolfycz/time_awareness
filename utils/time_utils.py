@@ -8,6 +8,8 @@ import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ..log import logger, tag
 
+UTC = datetime.timezone.utc
+
 
 
 def _get_astrbot_timezone(astrbot_config) -> str:
@@ -64,6 +66,29 @@ def get_now(config: dict, astrbot_config=None) -> datetime.datetime:
     return datetime.datetime.now()
 
 
+def to_utc(
+    dt: datetime.datetime,
+    default_tz: datetime.tzinfo | None = None,
+) -> datetime.datetime:
+    """将时间转换成内部统一使用的 UTC aware datetime。
+
+    旧版任务文件可能保存了 naive datetime。此时使用 ``default_tz`` 解释；
+    未提供时使用系统本地时区，保持与旧版 ``datetime.now()`` 的语义一致。
+    """
+    if not isinstance(dt, datetime.datetime):
+        raise TypeError(f"dt 必须是 datetime.datetime，收到 {type(dt)!r}")
+    if dt.tzinfo is None:
+        if default_tz is None:
+            default_tz = datetime.datetime.now().astimezone().tzinfo or UTC
+        dt = dt.replace(tzinfo=default_tz)
+    return dt.astimezone(UTC)
+
+
+def utc_now() -> datetime.datetime:
+    """返回 UTC aware 当前时间。"""
+    return datetime.datetime.now(UTC)
+
+
 def coerce_to_aware(dt: datetime.datetime, reference: datetime.datetime) -> datetime.datetime:
     """把 ``dt`` 的时区属性规整到与 ``reference`` 同性质，避免 aware/naive 比较报错。
 
@@ -72,16 +97,17 @@ def coerce_to_aware(dt: datetime.datetime, reference: datetime.datetime) -> date
     （或反之），直接 ``<=`` / ``-`` 会抛 ``TypeError: can't compare offset-naive
     and offset-aware datetimes``。
 
-    策略：``reference`` aware 时，把 naive 的 ``dt`` 视为同一本地时区（``replace(tzinfo=...)``）；
-    ``reference`` naive 时，把 aware 的 ``dt`` 剥离 tzinfo。同性质直接返回原值。
-
-    注意：这只是兜底——若 ``dt`` 与 ``reference`` 实际时区不同，规整后的"时刻"
-    仍可能差几小时。但用于"过期/未到期"判断足够准确。
+    策略：``reference`` aware 时，把 naive ``dt`` 解释为 reference 时区；两个值都
+    aware 时转换到 reference 时区。``reference`` naive 时，aware ``dt`` 先转换到
+    系统本地时区再移除 tzinfo，避免直接剥离 offset 导致时刻偏移。
     """
     if dt.tzinfo is None and reference.tzinfo is not None:
         return dt.replace(tzinfo=reference.tzinfo)
     if dt.tzinfo is not None and reference.tzinfo is None:
-        return dt.replace(tzinfo=None)
+        local_tz = datetime.datetime.now().astimezone().tzinfo or UTC
+        return dt.astimezone(local_tz).replace(tzinfo=None)
+    if dt.tzinfo is not None and reference.tzinfo is not None:
+        return dt.astimezone(reference.tzinfo)
     return dt
 
 

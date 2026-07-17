@@ -9,6 +9,8 @@ time_awareness Web API
 - GET  /time_awareness/calendar/month   月视图事件（builtin + custom 分组）
 - GET  /time_awareness/tasks/list       pending 任务列表
 - POST /time_awareness/tasks/cancel     取消任务
+- GET  /time_awareness/tasks/options    新增任务选项
+- POST /time_awareness/tasks/create     新增手动任务
 - GET  /time_awareness/config/schema    配置只读（schema 元信息 + 当前值）
 
 统一响应信封：``{success: bool, ...data | error: str}``
@@ -23,7 +25,6 @@ from quart import jsonify, request
 
 from astrbot.api import logger
 
-from .core.calendar_store import calendar_store
 from .log import tag
 from .utils.time_utils import coerce_to_aware, get_now, get_tz
 
@@ -112,6 +113,7 @@ def register_web_apis(context, plugin) -> None:
     """
     scheduler = plugin.scheduler
     config = plugin.config
+    calendar_store = plugin.calendar_store
 
     # ==================== 端点：about ====================
 
@@ -133,19 +135,20 @@ def register_web_apis(context, plugin) -> None:
         try:
             now = get_now(plugin.config, plugin._astrbot_config())
             pending = scheduler.all_pending()
+            failed = scheduler.all_failed()
 
             week_cutoff = now + timedelta(days=7)
             # 任务 fire_at 与 now 可能 aware/naive 不一致（用户中途改时区配置）
             # 用 coerce_to_aware 规整后再比较
             near_7d = sum(
                 1 for t in pending
-                if coerce_to_aware(t.fire_at, now) <= week_cutoff
+                if coerce_to_aware(t.due_at(), now) <= week_cutoff
             )
 
             next_task_display = "无"
             if pending:
-                next_t = min(pending, key=lambda t: coerce_to_aware(t.fire_at, now))
-                delta_sec = (coerce_to_aware(next_t.fire_at, now) - now).total_seconds()
+                next_t = min(pending, key=lambda t: coerce_to_aware(t.due_at(), now))
+                delta_sec = (coerce_to_aware(next_t.due_at(), now) - now).total_seconds()
                 if delta_sec < 0:
                     next_task_display = "已到期"
                 else:
@@ -169,6 +172,9 @@ def register_web_apis(context, plugin) -> None:
                 "task_pending_total": len(pending),
                 "task_calendar_pending": sum(1 for t in pending if t.kind == "calendar"),
                 "task_followup_pending": sum(1 for t in pending if t.kind == "followup"),
+                "task_user_pending": sum(1 for t in pending if t.kind == "user"),
+                "task_retry_wait": sum(1 for t in pending if t.status == "retry_wait"),
+                "task_failed_total": len(failed),
                 "this_month_event_count": len(month_events),
                 "near_7d_task_count": near_7d,
                 "reminder_enabled": bool(_safe_group_config(config, "reminder").get("enable_reminder", False)),
@@ -226,7 +232,9 @@ def register_web_apis(context, plugin) -> None:
 
     async def get_tasks_list():
         try:
-            tasks = scheduler.list_pending_detailed()
+            tasks = scheduler.list_pending_detailed(
+                display_tz=get_tz(plugin.config, plugin._astrbot_config())
+            )
             return _ok(tasks=tasks, total=len(tasks))
         except Exception as e:
             return _internal_error(e)
@@ -275,59 +283,31 @@ def register_web_apis(context, plugin) -> None:
             hint = str(data.get("hint", "")).strip()
             target_user_id = str(data.get("target_user_id", "")).strip()
 
-            # 1) session 白名单硬校验
-            if not session:
-                return _err("session 不能为空", 400)
-            allowed = plugin._reminder_targets()
-            if session not in allowed:
-                return _err("该会话不在 reminder_targets 白名单内", 400)
-
-            # 2) hint 非空 + 长度
-            if not hint:
-                return _err("hint 不能为空", 400)
-            if len(hint) > 500:
-                return _err("hint 长度不能超过 500 字", 400)
-
-            # 3) target_user_id 长度（可空）
-            if len(target_user_id) > 64:
-                return _err("target_user_id 长度不能超过 64 字符", 400)
-
-            # 4) fire_at_local 解析（datetime-local 格式：YYYY-MM-DDTHH:MM）
+            # datetime-local 格式：YYYY-MM-DDTHH:MM
             try:
                 naive = datetime.fromisoformat(fire_at_local)
             except ValueError:
                 return _err("fire_at_local 格式错误，需 YYYY-MM-DDTHH:MM", 400)
 
-            # 5) 时区 localize（tz=None 时保持 naive，与系统 now 同源）
+            # 时区 localize（tz=None 时保持 naive，与系统 now 同源）
             tz = get_tz(plugin.config, plugin._astrbot_config())
             fire_at = naive.replace(tzinfo=tz) if tz is not None else naive
 
-            # 6) 时间窗口校验（必须晚于 now+60s；上限 365 天防误填）
-            now = get_now(plugin.config, plugin._astrbot_config())
-            min_fire = now + timedelta(seconds=60)
-            max_fire = now + timedelta(days=365)
-            if fire_at <= min_fire:
-                return _err(
-                    f"触发时间距当前过近（弹窗默认时间是打开时算的 +10 分钟，"
-                    f"停留过久会被追上）。当前服务器时间 {now.strftime('%H:%M:%S')}，"
-                    f"请重新选一个至少 1 分钟后的时刻",
-                    400,
+            try:
+                task_id = await plugin.create_external_task(
+                    session=session,
+                    fire_at=fire_at,
+                    hint=hint,
+                    target_user_id=target_user_id,
+                    source="webui",
                 )
-            if fire_at > max_fire:
-                return _err("触发时间不能超过 365 天后", 400)
-
-            # 7) 入队
-            task = scheduler.add_user_task(
-                session=session,
-                fire_at=fire_at,
-                hint=hint,
-                target_user_id=target_user_id,
-            )
+            except ValueError as e:
+                return _err(str(e), 400)
             logger.info(
-                f"{tag()} 🧑 WebUI 创建手动提醒: id={task.id[:8]} session={session} "
+                f"{tag()} 🧑 WebUI 创建手动提醒: id={task_id[:8]} session={session} "
                 f"fire_at={fire_at.isoformat()}"
             )
-            return _ok(task_id=task.id, fire_at_iso=fire_at.isoformat())
+            return _ok(task_id=task_id, fire_at_iso=fire_at.isoformat())
         except Exception as e:
             return _internal_error(e)
 

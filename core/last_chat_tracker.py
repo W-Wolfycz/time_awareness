@@ -12,14 +12,15 @@
 数据结构（持久化到 ``last_chat_times.yaml``）::
 
     sessions:
-      "aiocqhttp:GroupMessage:12345":
+      "aiocqhttp:GroupMessage:10001":
         user: "2026-07-08T14:30:21+08:00"
         ai:  "2026-07-08T14:30:45+08:00"
 
-每次 ``record_*`` 即时调 ``atomic_write_yaml`` 写盘（文件 < 1KB，实测 < 5ms），
-无需 terminate 显式刷盘。
+``record_*`` 只更新内存，并通过短防抖任务合并写盘；插件 ``terminate`` 时强制
+flush，避免每轮用户/AI 消息都同步阻塞事件循环。
 """
 
+import asyncio
 import datetime
 
 from ._datafile import atomic_write_yaml, load_mapping
@@ -30,9 +31,12 @@ _DEFAULT_FILENAME = "last_chat_times.yaml"
 
 
 class LastChatTracker:
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, flush_delay_seconds: float = 2.0):
         self._path = f"{data_dir}/{_DEFAULT_FILENAME}"
         self._sessions: dict[str, dict[str, str]] = {}
+        self._flush_delay_seconds = max(0.1, float(flush_delay_seconds))
+        self._dirty = False
+        self._flush_task: asyncio.Task | None = None
 
     def load(self) -> None:
         data = load_mapping(self._path) or {}
@@ -43,24 +47,69 @@ class LastChatTracker:
                 for k, v in sessions.items()
                 if isinstance(v, dict)
             }
+        self._dirty = False
         logger.info(f"{tag()} 💬 上次对话时间记录已加载: {len(self._sessions)} 会话")
 
-    def _save(self) -> None:
-        atomic_write_yaml(self._path, {"sessions": self._sessions}, header="上次对话时间记录")
+    def flush(self) -> bool:
+        """立即把脏数据写盘。"""
+        if not self._dirty:
+            return True
+        ok = atomic_write_yaml(
+            self._path,
+            {"sessions": self._sessions},
+            header="上次对话时间记录",
+        )
+        if ok:
+            self._dirty = False
+        return ok
+
+    def _schedule_flush(self) -> None:
+        self._dirty = True
+        if self._flush_task is not None and not self._flush_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 纯逻辑测试或启动前调用：留待显式 flush/close。
+            return
+        self._flush_task = loop.create_task(self._flush_later())
+
+    async def _flush_later(self) -> None:
+        try:
+            await asyncio.sleep(self._flush_delay_seconds)
+            self.flush()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"{tag()} ⚠️ 上次对话时间防抖写盘失败: {e}")
+        finally:
+            self._flush_task = None
+
+    async def close(self) -> None:
+        """取消防抖任务并强制写盘；由插件 terminate 调用。"""
+        if self._flush_task is not None and not self._flush_task.done():
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+        self._flush_task = None
+        if not self.flush():
+            logger.warning(f"{tag()} ⚠️ 上次对话时间最终写盘失败")
 
     def record_user(self, umo: str, now: datetime.datetime) -> None:
         if not umo:
             return
         entry = self._sessions.setdefault(umo, {"user": "", "ai": ""})
         entry["user"] = now.isoformat()
-        self._save()
+        self._schedule_flush()
 
     def record_ai(self, umo: str, now: datetime.datetime) -> None:
         if not umo:
             return
         entry = self._sessions.setdefault(umo, {"user": "", "ai": ""})
         entry["ai"] = now.isoformat()
-        self._save()
+        self._schedule_flush()
 
     def summary(self, umo: str, now: datetime.datetime) -> str:
         """返回相对时间摘要，如「用户 5 分钟前 · AI 3 分钟前」。

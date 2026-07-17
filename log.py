@@ -2,7 +2,7 @@
 
 - ``debug_to_info``：把 debug 日志提级为 info 输出，让用户无需改 AstrBot 后端
   日志级别即可看到详细运行信息。
-- ``log_with_bot_id``：在日志前缀中附加机器人实例标识（如 ``[time_awareness:qq12345]``），
+- ``log_with_bot_id``：在日志前缀中附加机器人实例标识（如 ``[time_awareness:bot_demo]``），
   区分多 bot 共存场景。前缀通过 ``tag(event)`` 在调用点拼装——只有能拿到 event
   的调用点（hook/命令）才会带 platform_id，后台调度等无 event 的日志保持原样。
 

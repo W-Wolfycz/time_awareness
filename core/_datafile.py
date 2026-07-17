@@ -8,7 +8,8 @@
 - 仅使用 ``yaml.safe_load`` / ``yaml.safe_dump``，杜绝任意对象构造带来的安全风险。
 - 写入采用 ``allow_unicode=True``（中文不转义）、``sort_keys=False``（保持插入顺序，
   diff 友好）、``default_flow_style=False``（块状缩进，最直观）。
-- 写入沿用「``.tmp`` + ``os.rename``」原子替换，并在 Windows 下先删旧文件。
+- 写入使用「``.tmp`` + ``os.replace``」原子替换；替换前 flush + fsync，减少进程
+  崩溃时留下空文件或半文件的概率。
 - 读取优先使用 libyaml C 扩展（``CSafeLoader``）提速；写出固定使用纯 Python
   ``SafeDumper``：libyaml 的 C emitter 会忽略按节点设置的块样式（``|``）并转义
   星平面 Unicode（如 emoji），使长消息可读性变差。
@@ -95,10 +96,10 @@ def atomic_write_yaml(path: str, data: dict, header: str | None = None) -> bool:
     try:
         with open(temp_file, "w", encoding="utf-8") as f:
             f.write(dump_yaml_str(data, header=header))
+            f.flush()
+            os.fsync(f.fileno())
 
-        if os.name == "nt" and os.path.exists(path):
-            os.remove(path)
-        os.rename(temp_file, path)
+        os.replace(temp_file, path)
         return True
     except Exception as e:
         logger.error(f"{tag()} ❌ 写入文件失败: {path}: {e}")

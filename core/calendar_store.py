@@ -75,20 +75,13 @@ def event_active_in_year(event: dict, year: int) -> bool:
 
 
 class CalendarStore:
-    """时间表事项内存存储（单例）"""
+    """时间表事项内存存储。
 
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+    v1.8.0 起插件实例通过依赖注入持有独立 Store；模块底部仍保留默认实例，
+    兼容第三方代码直接导入 ``calendar_store`` 的历史用法。
+    """
 
     def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
         self.events: list = []  # 用户自定义事件（calendar_data.yaml）
         self.builtin_events: list = []  # 内置现实日历事件（builtin_events.yaml）
         logger.debug(f"{tag()} CalendarStore 初始化完成")

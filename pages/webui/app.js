@@ -28,7 +28,7 @@ const VIEW_TITLES = {
 
 // ==================== [2] API client ====================
 // 桥接模式下 endpoint 不带插件名前缀——父窗口自动拼 /{plugin_name}/<endpoint>
-// 降级模式（脱离 AstrBot 直接打开）才拼完整 /api/{plugin_name}/<endpoint>
+// 降级模式（未注入 bridge）按 AstrBot 4.26.3 路由拼 /api/plug/{plugin_name}/<endpoint>
 async function apiGet(endpoint, params = {}) {
   if (bridge && typeof bridge.apiGet === 'function') {
     return bridge.apiGet(endpoint, params);
@@ -39,7 +39,7 @@ async function apiGet(endpoint, params = {}) {
     if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
   });
   const query = qs.toString();
-  const url = `/api/${PLUGIN_NAME}/${endpoint}${query ? '?' + query : ''}`;
+  const url = `/api/plug/${PLUGIN_NAME}/${endpoint}${query ? '?' + query : ''}`;
   const resp = await fetch(url);
   return resp.json();
 }
@@ -48,7 +48,7 @@ async function apiPost(endpoint, body = {}) {
   if (bridge && typeof bridge.apiPost === 'function') {
     return bridge.apiPost(endpoint, body);
   }
-  const resp = await fetch(`/api/${PLUGIN_NAME}/${endpoint}`, {
+  const resp = await fetch(`/api/plug/${PLUGIN_NAME}/${endpoint}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -204,7 +204,7 @@ async function renderDashboard() {
         <div class="metric-card">
           <div class="metric-label">待触发任务</div>
           <div class="metric-value">${s.task_pending_total}</div>
-          <div class="metric-sub">日历 ${s.task_calendar_pending} · 后续 ${s.task_followup_pending}</div>
+          <div class="metric-sub">日历 ${s.task_calendar_pending} · 后续 ${s.task_followup_pending} · 手动 ${s.task_user_pending || 0}${s.task_retry_wait ? ' · 重试 ' + s.task_retry_wait : ''}${s.task_failed_total ? ' · 失败 ' + s.task_failed_total : ''}</div>
         </div>
         <div class="metric-card">
           <div class="metric-label">近 7 天任务</div>
@@ -461,10 +461,16 @@ async function renderTasks() {
         ? ` → <code style="font-family: var(--mono); color: var(--text-muted);">${escapeHtml(t.target_user_id)}</code>`
         : '';
       const hintDisplay = t.hint ? escapeHtml(t.hint) : '<span style="color: var(--text-muted);">—</span>';
+      const retryBadge = t.status === 'retry_wait'
+        ? `<span class="badge badge-warning" title="已尝试 ${Number(t.attempts || 0)} 次">等待重试</span>`
+        : '';
+      const fireDisplay = t.status === 'retry_wait' && t.next_retry_at_iso
+        ? `${escapeHtml(formatIsoLocal(t.next_retry_at_iso))}<div style="font-size:11px;color:var(--text-muted);">原定 ${escapeHtml(formatIsoLocal(t.fire_at_iso))}</div>`
+        : escapeHtml(formatIsoLocal(t.fire_at_iso));
       return `
         <tr>
-          <td data-label="类型">${kindBadge}</td>
-          <td data-label="触发时间" class="col-time">${escapeHtml(formatIsoLocal(t.fire_at_iso))}</td>
+          <td data-label="类型">${kindBadge} ${retryBadge}</td>
+          <td data-label="触发时间" class="col-time">${fireDisplay}</td>
           <td data-label="会话"><code style="font-family: var(--mono); font-size: 12px; color: var(--text-muted); word-break: break-all;">${escapeHtml(t.session)}</code></td>
           <td data-label="内容">${hintDisplay}${targetInfo}</td>
           <td data-label="操作" class="col-actions">

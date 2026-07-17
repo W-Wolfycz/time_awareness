@@ -133,7 +133,7 @@ async def generate_calendar_events(
 
     try:
         llm_response = await context.llm_generate(
-            chat_provider_id=provider_id or None,
+            chat_provider_id=provider_id,
             prompt=user_prompt,
             system_prompt=system_prompt,
         )

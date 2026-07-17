@@ -12,7 +12,7 @@
 - **AI 日历生成**：用户给一个世界观/主题，LLM 一次性生成一整年日历事项
 - **现实日历事件**：法定节假日（含调休）/ 传统农历节日 / 二十四节气 / 政治纪念日 / 国际西方节日
 - **黄历感知（独立标签）**：每日干支 / 冲煞 / 宜忌，走独立 `<ALMANAC_STATE>` 标签，不混入事件清单
-- **主动提醒**：当日事项在指定时刻主动发到白名单会话；可选「无事件也发日常问候」；LLM 可通过 `schedule_followup` 工具自行安排后续主动消息；WebUI 可手动添加一次性任务
+- **主动提醒**：当日事项在指定时刻主动发到白名单会话；可选「无事件也发日常问候」；LLM 可通过 `schedule_followup` 工具自行安排后续主动消息；任务使用 UTC 持久化状态机，发送前失败可自动重试
 - **Plugin Pages WebUI**：AstrBot 主 webui 侧边栏点开即用，含概览（时间感知 hero 面板）/ 日历月视图 / 任务列表
 
 ## 安装
@@ -77,9 +77,11 @@
 | `reminder_time` | 当日事项发送时刻（HH:MM） | `09:00` |
 | `daily_greeting_without_events` | 当日无事件也发日常问候 | false |
 | `reminder_max_late_minutes` | 迟到容忍窗口（分钟，超出则丢弃） | 60 |
+| `reminder_max_attempts` | Provider/LLM 等发送前失败的最大尝试次数 | 3 |
 | `reminder_late_prompt` | 补发时附加的迟到提示词 | 内置默认 |
 | `followup_tool_enabled` | 向 LLM 注册 `schedule_followup` 工具 | true |
-| `reminder_provider_id` | 主动提醒使用的模型（留空跟随主模型） | "" |
+| `use_chat_memory_history` | 主动提醒生成时复用 ChatMemory 当前接管上下文 | false |
+| `reminder_provider_id` | 主动提醒使用的模型（留空跟随当前会话模型） | "" |
 
 ### `log`（日志）
 
@@ -123,21 +125,67 @@
 
 在 AstrBot 主 webui 左侧「插件管理」找到 time_awareness，点「插件页」进入。三个视图：
 
-- **概览**：事件总数、本月事件数、待触发任务、近 7 天任务、下个任务相对时间、启用状态指标卡
+- **概览**：事件总数、本月事件数、待触发/重试/失败任务、近 7 天任务、下个任务相对时间、启用状态指标卡
 - **日历**：月视图 7×6 grid，内置事件（灰）与自定义事件（蓝）同屏颜色区分；前后翻月 + 「今」回当月；超长事件（如黄历）hover 显示完整内容
-- **任务**：pending 任务列表按触发时间升序，可取消（二次确认）；管理员可手动添加一次性任务
+- **任务**：pending/retry_wait 任务按触发时间升序，可取消（二次确认）；等待重试任务显示原定时间和下次重试时间；管理员可手动添加一次性任务
 
 配置修改仍走 AstrBot 主 webui 的「插件配置」页，WebUI 暂为只读视图（任务 tab 除外）。
 
-## 推荐 companion 插件
+## 插件间 API
 
-主动消息发送前会走消息装饰器处理链。**强烈推荐配合 [splitter_w](https://github.com/Soulter/astrbot_plugin_splitter_w) 使用**——未装时主动消息会一整条直发，失去切段与打字节奏感。
+其他插件可通过 `context.get_registered_star("time_awareness")` 拿到本插件实例，调用以下公共方法安排任务：
+
+### `create_external_task(session, fire_at, hint, target_user_id="", source="") -> str`
+
+到点主动发一条消息（与 WebUI 手动添加任务同型）。示例：
+
+```python
+star_meta = self.context.get_registered_star("time_awareness")
+if star_meta and star_meta.star_cls:
+    ta = star_meta.star_cls
+    from datetime import datetime, timedelta, timezone
+    fire_at = datetime.now(timezone.utc) + timedelta(hours=2)
+    task_id = await ta.create_external_task(
+        session="aiocqhttp:GroupMessage:10001",
+        fire_at=fire_at,
+        hint="该喝水了",
+        source="plugin:water_reminder",
+    )
+```
+
+**约束**：
+
+- `session` 必须在 `reminder_targets` 白名单内
+- `hint` 1-500 字
+- `fire_at` 必须晚于当前 +60 秒、不超过 365 天；aware/naive 均可（naive 按插件当前有效时区解释）
+- 返回 `task_id`（32 字符 hex），可用 `scheduler.cancel_task(task_id)` 取消
+- 违反约束抛 `ValueError`
+
+## 分段插件兼容
+
+主动消息发送前会走消息装饰器处理链，可由其他分段插件进行切段和节奏处理。未安装分段插件时，主动消息会作为一整条消息直接发送。
+
+### ChatMemory 历史注入
+
+- `use_chat_memory_history` 默认关闭
+- 启用后仅通过 `context.get_registered_star("chat_memory")` 调用 ChatMemory 公开 API，不直接导入对方插件模块
+- ChatMemory 必须已经安装、激活且开启 `context_takeover`；不可用、接管关闭、没有当前 conversation 或查询失败时自动降级为不注入历史
+- 通过 ChatMemory 的只读 `build_takeover_contexts()` API 构建上下文，自动遵循 CM 当前的跨会话/整群范围、状态过滤、内容白名单、Persona、前缀和预算配置
+- 私聊自动使用 UMO 中的用户 ID；群聊仅在任务带目标用户时查询该用户。目标为空且 CM 开启 `full_group` 时只取当前 UMO + CID 的整群上下文，即使开启 `cross_session` 也不会扩大到其他会话或整个平台
+- 历史只作为本次主动提醒的 LLM `contexts`，不会写入 time_awareness 自身数据文件
+
+### 提醒重试语义
+
+- Provider 查询、LLM 调用、空/异常模型响应等尚未进入发送阶段的失败，会按 1、2、4…分钟指数退避重试（上限 15 分钟），总尝试次数由 `reminder_max_attempts` 控制
+- 进入 `on_decorating_result` 前会持久化 `delivery_started`。其他分段插件可能已经主动发送部分分段，因此装饰或最终发送失败会标记为 `failed`，不会自动重发整条消息
+- 插件在 LLM 阶段退出时，`processing` 任务会在重启后恢复；若退出前已经进入装饰/发送阶段，则为避免重复消息转为 `failed`
+- `reminder_tasks.yaml` v1 会在首次加载时自动迁移到 v2；历史 naive 时间按升级时的有效配置时区解释，再统一转换为 UTC
 
 ## 文件结构
 
 ```
 time_awareness/
-├── main.py                   # Star 类 + 钩子 + 命令树 + 主动提醒
+├── main.py                   # Star 生命周期 + Hook/命令注册 + 兼容入口
 ├── web_api.py                # Plugin Pages 后端 API（8 端点）
 ├── _conf_schema.json         # 五组配置 schema
 ├── metadata.yaml
@@ -150,11 +198,21 @@ time_awareness/
 │   ├── calendar_manager.py   # 用户事件 CRUD + 导入导出
 │   ├── builtin_events.py     # 现实事件生成器
 │   ├── builtin_manager.py    # 内置事件文件管理 + 跨年重新生成
-│   └── scheduler.py          # 提醒调度循环
+│   └── scheduler.py          # UTC 任务状态机 + 调度循环
+├── services/
+│   ├── time_context_service.py # 动态时间状态组装
+│   └── reminder_service.py     # 提醒校验、LLM 与发送编排
+├── integrations/
+│   ├── chat_memory_history.py # 可选 ChatMemory 历史读取
+│   ├── persona_resolver.py     # AstrBot Persona 解析
+│   └── astrbot_sender.py       # 主动消息装饰与发送适配
+├── commands/
+│   └── calendar_helpers.py     # 日历命令纯解析/展示助手
 ├── pages/webui/              # 前端三件套（vanilla JS）
-└── llm/
-    ├── calendar_generator.py # AI 生成日历
-    └── schedule_generator.py # AI 生成日程表
+├── llm/
+│   ├── calendar_generator.py # AI 生成日历
+│   └── schedule_generator.py # AI 生成日程表
+└── tests/                    # 不依赖完整 AstrBot runtime 的纯逻辑测试
 ```
 
 ## 数据文件
@@ -165,11 +223,11 @@ time_awareness/
 |------|------|
 | `calendar_data.yaml` | 用户自定义事件 |
 | `builtin_events.yaml` | 内置现实事件（每年自动重新生成） |
-| `reminder_tasks.yaml` | 主动提醒任务队列 |
+| `reminder_tasks.yaml` | 主动提醒任务队列（v2，UTC + 状态/重试信息） |
 | `last_chat_times.yaml` | 各会话上次对话时间（用户/AI，用于 `<LAST_CHAT>` 注入） |
 
 ## 依赖
 
 - Python ≥ 3.10
-- AstrBot ≥ 4.24.0
+- AstrBot ≥ 4.26.0，< 5
 - `pyyaml` / `chinese_calendar` / `lunar_python`
