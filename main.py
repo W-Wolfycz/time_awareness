@@ -3,7 +3,7 @@ time_awareness — 时间感知增强
 
 为 LLM 注入：
 1. 静态时间规则 → system_prompt 末尾（保 Prompt 缓存前缀稳定）
-2. 当前时段状态 / 当日事项 → extra_user_content_parts + mark_as_temp
+2. 现实时间、当前时段状态 / 当日事项 → extra_user_content_parts + mark_as_temp
    （注入到当前轮 user 消息末尾，不持久化到历史）
 
 日历管理通过聊天命令 `/calendar show|add|del|create|export|import|help`。
@@ -446,11 +446,12 @@ class CalendarPlusPlugin(Star):
         return self.time_context.time_guidance_enabled()
 
     def _build_dynamic_time_data(self, session: str | None = None) -> str:
-        """动态时间数据：时段状态 + 工作日性质 + 农历 + 当日事项 + 黄历 + 上次对话时间。
+        """动态时间数据：现实时间 + 时段状态 + 工作日性质 + 农历 + 当日事项 + 黄历 + 上次对话时间。
 
         所有标签受 ``time_guidance_enabled`` 总开关约束（关掉则不调本方法）；
         子标签各自有独立开关。
 
+        - ``<SYSTEM_REMINDER>``：由 time_awareness 独立输出当前日期、时间、时区和星期
         - ``<SCHEDULE_STATE>``：总是输出（rule 3 显式处理「未指定」语义）
         - ``<WORKDAY_STATE>``：受 ``workday_state_enabled`` 控制；总是有值（chinese_calendar
           未覆盖年份时降级为「周X」）
@@ -570,7 +571,8 @@ class CalendarPlusPlugin(Star):
 
         - 静态规则 ``DEFAULT_TIME_GUIDANCE_PROMPT`` → ``req.system_prompt`` 末尾。
           system_prompt 永远字节稳定（除了规则文本就是 persona），命中 provider Prompt 缓存。
-        - 动态数据（``<SCHEDULE_STATE>`` + ``<WORKDAY_STATE>`` + ``<TODAY_EVENTS>`` +
+        - 动态数据（``<SYSTEM_REMINDER>`` + ``<SCHEDULE_STATE>`` + ``<WORKDAY_STATE>`` +
+          ``<TODAY_EVENTS>`` +
           ``<LAST_CHAT>``）→ ``req.extra_user_content_parts``，
           ``mark_as_temp()`` 标记后历史持久化时被剥掉，下一轮历史里消失。
 
@@ -999,7 +1001,7 @@ class CalendarPlusPlugin(Star):
             "\n"
             "时间格式：HH:MM（24 小时制）\n"
             "- end_time < start_time 视为跨午夜（如 22:00→08:00）\n"
-            "- end_time exclusive：当前时间 < end_time 才算命中\n"
+            "- 时段按左闭右开 [start_time, end_time) 匹配：开始时刻计入，结束时刻不计入\n"
             "\n"
             "示例：\n"
             "/schedule show  — 查看当前时段配置\n"

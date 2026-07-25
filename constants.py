@@ -7,12 +7,13 @@
 # ==================== 时间感知提示词 ====================
 
 # 静态时间引导规则——硬编码（用户不可在 webui 配置）。
-# 数据 XML 标签（<SCHEDULE_STATE> / <WORKDAY_STATE> / <LUNAR_STATE> / <TODAY_EVENTS> /
-# <ALMANAC_STATE> / <LAST_CHAT>）由代码注入到 user 消息末尾，规则文本仅作为 LLM
-# 解读这些标签的指令；保持静态以命中 provider Prompt 缓存。
+# 数据 XML 标签（<SYSTEM_REMINDER> / <SCHEDULE_STATE> / <WORKDAY_STATE> /
+# <LUNAR_STATE> / <TODAY_EVENTS> / <ALMANAC_STATE> / <LAST_CHAT>）由代码注入到
+# 当前轮消息末尾，规则文本仅作为 LLM 解读这些数据的指令；保持静态以命中 provider
+# Prompt 缓存。
 DEFAULT_TIME_GUIDANCE_PROMPT = """<TIME_GUIDE>
 时间感知规则（必须严格遵守）：
-1. 真实性：下方 <SCHEDULE_STATE> / <WORKDAY_STATE> / <LUNAR_STATE> / <TODAY_EVENTS> / <ALMANAC_STATE> / <LAST_CHAT>（如存在）是当前时间的唯一可信来源；其他时间细节也禁止编造或推测。<TODAY_EVENTS> 缺席即表示当日无特殊事项。
+1. 真实性：下方 <SYSTEM_REMINDER> 中的当前日期时间（如存在）以及 <SCHEDULE_STATE> / <WORKDAY_STATE> / <LUNAR_STATE> / <TODAY_EVENTS> / <ALMANAC_STATE> / <LAST_CHAT>（如存在）是当前时间的唯一可信来源；其他时间细节也禁止编造或推测。<TODAY_EVENTS> 缺席即表示当日无特殊事项。
 2. 自然回应：优先使用自然口语（如"刚才"、"大半夜"、"好久不见"）替代数字报时，仅在用户明确询问时提供精确时间。
 3. 状态映射：参考 <SCHEDULE_STATE> 自然带入人设（不刻意强调数字）。值为「未指定」时按人设与时段常识自由演绎即可。
 4. 上下文 aware：参考 <LAST_CHAT>（如存在）的时间间隔调整语气——很久没聊可表露想念，刚刚还在聊则保持连贯。

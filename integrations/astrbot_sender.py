@@ -29,6 +29,53 @@ class SendOutcome:
     side_effects_started: bool = False
 
 
+class _ProactiveMessageEvent(AstrMessageEvent):
+    """让主动消息装饰器获得与普通平台事件一致的 ``send()`` 语义。
+
+    基础 ``AstrMessageEvent.send()`` 只记录发送指标，不会调用平台。BubbleReply
+    等装饰器会用 ``event.send()`` 发出前 N-1 段，因此主动消息必须在这里显式
+    委托 ``Context.send_message()``，否则前置分段（以及通常位于首段的 At）会丢失。
+    """
+
+    def __init__(
+        self,
+        *,
+        context: Any,
+        outbound_session: MessageSession,
+        message_obj: AstrBotMessage,
+        platform_meta: Any,
+        session_id: str,
+    ) -> None:
+        self._context = context
+        self._outbound_session = outbound_session
+        self._active_send_error = ""
+        super().__init__(
+            message_str="",
+            message_obj=message_obj,
+            platform_meta=platform_meta,
+            session_id=session_id,
+        )
+
+    async def send(self, message: MessageChain) -> None:
+        try:
+            sent = await self._context.send_message(self._outbound_session, message)
+        except Exception as e:
+            self._active_send_error = f"{type(e).__name__}: {e}"
+            raise
+        if not sent:
+            self._active_send_error = (
+                f"找不到 session 对应的平台: {self._outbound_session}"
+            )
+            raise RuntimeError(self._active_send_error)
+        # 保留 AstrMessageEvent 的发送标记与指标语义；平台子类同样在实际发送成功后调用。
+        await super().send(message)
+
+    @property
+    def active_send_error(self) -> str:
+        """装饰器通过 ``event.send()`` 发送前置分段时的最近一次失败。"""
+        return self._active_send_error
+
+
 class AstrBotMessageSender:
     def __init__(self, context: Any):
         self.context = context
@@ -36,13 +83,19 @@ class AstrBotMessageSender:
     async def send_decorated(self, session: str, components: list) -> SendOutcome:
         """运行装饰链并发送剩余消息链。"""
         try:
-            processed = await self.decorate(session, components)
+            processed, event = await self._decorate(session, components)
         except Exception as e:
             logger.error(f"{tag()} ❌ 主动消息装饰链失败: {e}")
             return SendOutcome(False, str(e), side_effects_started=True)
 
         if not processed:
             # Hook 清空结果通常表示它已自行完成发送或明确吞掉消息。
+            if event and event.active_send_error:
+                return SendOutcome(
+                    False,
+                    f"装饰器前置分段发送失败: {event.active_send_error}",
+                    side_effects_started=True,
+                )
             return SendOutcome(True, side_effects_started=True)
 
         try:
@@ -58,9 +111,26 @@ class AstrBotMessageSender:
                 f"找不到 session 对应的平台: {session}",
                 side_effects_started=True,
             )
+        if event and event.active_send_error:
+            # BubbleReply 等装饰器会在单段失败后保留剩余结果，让最终发送仍可继续。
+            # 此时尽量发完剩余内容，但不能把整条任务误记为成功，也不能自动重发。
+            return SendOutcome(
+                False,
+                f"装饰器前置分段发送失败: {event.active_send_error}",
+                side_effects_started=True,
+            )
         return SendOutcome(True, side_effects_started=True)
 
     async def decorate(self, session: str, components: list) -> list:
+        """兼容既有测试/调用方，仅返回装饰后的剩余组件。"""
+        processed, _ = await self._decorate(session, components)
+        return processed
+
+    async def _decorate(
+        self,
+        session: str,
+        components: list,
+    ) -> tuple[list, _ProactiveMessageEvent | None]:
         message_session = MessageSession.from_str(session)
         platform_inst = self.context.get_platform_inst(message_session.platform_id)
         if platform_inst is None:
@@ -73,7 +143,7 @@ class AstrBotMessageSender:
                 None,
             )
         if platform_inst is None:
-            return list(components)
+            return list(components), None
 
         target_id = message_session.session_id
         message_obj = AstrBotMessage()
@@ -88,8 +158,9 @@ class AstrBotMessageSender:
         message_obj.raw_message = None
         message_obj.message_id = ""
 
-        event = AstrMessageEvent(
-            message_str="",
+        event = _ProactiveMessageEvent(
+            context=self.context,
+            outbound_session=message_session,
             message_obj=message_obj,
             platform_meta=platform_inst.meta(),
             session_id=target_id,
@@ -109,14 +180,16 @@ class AstrBotMessageSender:
         for handler in handlers:
             try:
                 await handler.handler(event)
-            except Exception as e:
+            except BaseException as e:
                 logger.warning(
                     f"{tag()} ⚠️ 装饰钩子执行失败 {handler.handler_full_name}: {e}"
                 )
             if event.is_stopped():
-                break
+                # 与 AstrBot ResultDecorateStage 一致：stop_event() 后不再进入
+                # Respond/最终发送阶段。装饰器若已自行发送，调用方会将其视为已处理。
+                return [], event
 
         final_result = event.get_result()
         if final_result and final_result.chain is not None:
-            return list(final_result.chain)
-        return []
+            return list(final_result.chain), event
+        return [], event

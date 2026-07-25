@@ -22,6 +22,15 @@ from ..utils.time_utils import find_active_schedule_slot, get_now
 
 class TimeContextService:
     _WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    _WEEKDAY_FULL_CN = (
+        "星期一",
+        "星期二",
+        "星期三",
+        "星期四",
+        "星期五",
+        "星期六",
+        "星期日",
+    )
 
     def __init__(
         self,
@@ -58,9 +67,19 @@ class TimeContextService:
     def last_chat_enabled(self) -> bool:
         return bool(self.config.get("time_awareness", {}).get("last_chat_enabled", True))
 
-    def build_dynamic(self, session: str | None = None) -> str:
-        parts = [f"<SCHEDULE_STATE>{self.resolve_schedule_state()}</SCHEDULE_STATE>"]
-        now = self.now()
+    def build_dynamic(self, session: str | None = None, *, now=None) -> str:
+        """构造本轮动态状态；传入 ``now`` 时整轮复用同一时间快照。
+
+        现实时间标签采用与 AstrBot 同语义的 ``system_reminder`` 结构，
+        但使用本插件统一的大写标签和中文内容；主动消息不依赖 AstrBot 请求 Hook。
+        """
+        now = now or self.now()
+        parts = []
+        if self.time_guidance_enabled():
+            parts.append(self.build_datetime_reminder(now=now))
+        parts.append(
+            f"<SCHEDULE_STATE>{self.resolve_schedule_state(now=now)}</SCHEDULE_STATE>"
+        )
         date = now.date()
 
         if self.workday_enabled():
@@ -86,6 +105,24 @@ class TimeContextService:
             if summary:
                 parts.append(f"<LAST_CHAT>{summary}</LAST_CHAT>")
         return "\n".join(parts)
+
+    def build_datetime_reminder(self, *, now=None) -> str:
+        """构造本插件风格的当前时间提示。
+
+        这是 time_awareness 自己的现实时间感知数据。主动提醒直接调用
+        ``Context.llm_generate``，普通消息也通过本插件的动态内容注入；两条路径
+        都不依赖 AstrBot 是否开启同名配置。AstrBot 原生的小写标签不由本插件修改。
+        """
+        now = now or self.now()
+        display_now = now if now.tzinfo is not None else now.astimezone()
+        current_time = display_now.strftime("%Y-%m-%d %H:%M")
+        timezone_name = display_now.strftime("%Z")
+        weekday = self._WEEKDAY_FULL_CN[display_now.weekday()]
+        return (
+            "<SYSTEM_REMINDER>"
+            f"当前日期时间：{current_time}（{timezone_name}），{weekday}"
+            "</SYSTEM_REMINDER>"
+        )
 
     def today_events_text(self, *, now=None) -> str:
         calendar_config = self.config.get("calendar", {})
@@ -115,11 +152,11 @@ class TimeContextService:
             result.append(CATEGORY_INTERNATIONAL)
         return result
 
-    def resolve_schedule_state(self) -> str:
+    def resolve_schedule_state(self, *, now=None) -> str:
         daily_schedule = self.config.get("daily_schedule", {})
         if not daily_schedule.get("enable_schedule", False):
             return "未指定（按人设自然推断）"
-        now = self.now()
+        now = now or self.now()
         slot = find_active_schedule_slot(daily_schedule, now)
         if slot is None:
             logger.debug(f"{tag()} 日程表未命中任何时段（now={now.strftime('%H:%M')}）")

@@ -126,9 +126,10 @@ def is_in_time_range(time_range: str, tz=None) -> bool:
         end_minutes = end_hour * 60 + end_min
 
         if start_minutes > end_minutes:
-            return current_minutes >= start_minutes or current_minutes <= end_minutes
+            # 跨午夜同样采用左闭右开，结束时刻属于次日的下一段。
+            return current_minutes >= start_minutes or current_minutes < end_minutes
         else:
-            return start_minutes <= current_minutes <= end_minutes
+            return start_minutes <= current_minutes < end_minutes
     except Exception as e:
         logger.warning(f"{tag()} ⚠️ 时间范围解析错误: {e}")
         return False

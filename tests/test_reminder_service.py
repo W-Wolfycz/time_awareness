@@ -3,7 +3,10 @@ import datetime
 
 import pytest
 
+from time_awareness.core.calendar_store import CalendarStore
+from time_awareness.core.last_chat_tracker import LastChatTracker
 from time_awareness.services.reminder_service import ReminderService
+from time_awareness.services.time_context_service import TimeContextService
 
 
 class _Scheduler:
@@ -21,13 +24,24 @@ class _Scheduler:
 
 
 class _Context:
+    def get_config(self, umo=None):
+        return {"provider_settings": {"datetime_system_prompt": False}}
+
     async def get_current_chat_provider_id(self, umo):
         raise RuntimeError("provider unavailable")
 
 
 class _SuccessContext:
-    def __init__(self):
+    def __init__(self, *, datetime_system_prompt=False):
         self.kwargs = None
+        self.datetime_system_prompt = datetime_system_prompt
+
+    def get_config(self, umo=None):
+        return {
+            "provider_settings": {
+                "datetime_system_prompt": self.datetime_system_prompt,
+            }
+        }
 
     async def get_current_chat_provider_id(self, umo):
         return "provider_demo"
@@ -180,3 +194,89 @@ def test_chat_memory_history_checkbox_passes_contexts_to_llm(monkeypatch):
         "persona_id": "",
         "user_id": "10001",
     }
+
+
+def test_proactive_llm_gets_plugin_datetime_even_when_astrbot_setting_is_off(tmp_path):
+    context = _SuccessContext(datetime_system_prompt=False)
+    fixed_now = datetime.datetime(
+        2026,
+        7,
+        24,
+        9,
+        0,
+        tzinfo=datetime.timezone(datetime.timedelta(hours=8), "CST"),
+    )
+    now_calls = []
+    time_config = {
+        "time_awareness": {
+            "time_guidance_enabled": True,
+            "workday_state_enabled": False,
+            "lunar_state_enabled": False,
+            "almanac_enabled": False,
+            "last_chat_enabled": False,
+        },
+        "daily_schedule": {
+            "enable_schedule": True,
+            "schedule_templates": [
+                {
+                    "name": "晨间",
+                    "start_time": "08:00",
+                    "end_time": "10:00",
+                    "state_prompt": "正在清醒地开始上午安排",
+                }
+            ],
+        },
+        "calendar": {"enable_calendar": False},
+    }
+
+    def now_provider():
+        now_calls.append(True)
+        return fixed_now
+
+    time_context = TimeContextService(
+        config=time_config,
+        astrbot_config_provider=lambda: {"timezone": "Asia/Shanghai"},
+        calendar_store=CalendarStore(),
+        last_chat_tracker=LastChatTracker(str(tmp_path)),
+        now_provider=now_provider,
+    )
+    service = ReminderService(
+        context=context,
+        config={
+            "reminder": {
+                "reminder_targets": ["demo:GroupMessage:group_demo"],
+            }
+        },
+        scheduler=_Scheduler(),
+        time_context=time_context,
+        message_sender=_FailedSender(),
+        last_chat_tracker=object(),
+        astrbot_config_provider=lambda: {"timezone": "Asia/Shanghai"},
+        ensure_builtin_fresh=lambda: None,
+    )
+    task = type(
+        "Task",
+        (),
+        {"kind": "user", "hint": "演示提醒", "target_user_id": ""},
+    )()
+
+    result = asyncio.run(
+        service.deliver(
+            session="demo:GroupMessage:group_demo",
+            tasks=[task],
+            is_late=False,
+            late_minutes=0,
+        )
+    )
+
+    assert result.success is False
+    assert context.kwargs["system_prompt"].startswith("<TIME_GUIDE>")
+    assert "正在清醒地开始上午安排" not in context.kwargs["system_prompt"]
+    assert (
+        "<SYSTEM_REMINDER>当前日期时间：2026-07-24 09:00（CST），星期五</SYSTEM_REMINDER>"
+    ) in context.kwargs["prompt"]
+    assert "<SCHEDULE_STATE>正在清醒地开始上午安排</SCHEDULE_STATE>" in context.kwargs[
+        "prompt"
+    ]
+    assert "用空行分隔，每段将作为独立消息发出" not in context.kwargs["prompt"]
+    assert len(now_calls) == 1

@@ -11,3 +11,7 @@ calendar_data.yaml
 reminder_tasks.yaml
 last_chat_times.yaml
 data/
+
+# Logo 生成过程的参考图、提示词和候选输出不属于插件运行时。
+logo-assets/
+

@@ -4,10 +4,10 @@
         "type": "object",
         "items": {
             "time_guidance_enabled": {
-                "description": "✅ 启用时间感知增强",
+                "description": "✅ 启用时间感知增强（含现实时间）",
                 "type": "bool",
                 "default": true,
-                "hint": "向 LLM 提供时间规则、当前时段和当日事项；动态内容仅用于当前一轮，不写入对话历史"
+                "hint": "由本插件向 LLM 提供当前公历日期、时间、时区、星期、时间规则、当前时段和当日事项；动态内容仅用于当前一轮，不写入对话历史。插件会独立注入现实时间；若 AstrBot「现实世界时间感知」已启用，建议关闭 AstrBot 对应开关以避免重复并节省 token"
             },
             "workday_state_enabled": {
                 "description": "📅 工作日性质感知",
@@ -37,7 +37,7 @@
                 "description": "🌐 跟随 AstrBot 时区",
                 "type": "bool",
                 "default": false,
-                "hint": "优先使用 AstrBot 全局时区；未配置时回退到下方时区"
+                "hint": "优先使用 AstrBot 全局时区；现实时间标签和其他传感器均使用最终生效时区；未配置时回退到下方时区"
             },
             "timezone": {
                 "description": "🕐 时区",
@@ -50,7 +50,7 @@
     "daily_schedule": {
         "description": "🗓️ 单日日程表（时段状态感知）",
         "type": "object",
-        "hint": "按时间段定义角色状态，并向 LLM 提供当前命中的状态描述",
+        "hint": "按时间段定义角色状态；时段采用左闭右开 [开始时间, 结束时间)，并向 LLM 提供当前命中的状态描述",
         "items": {
             "enable_schedule": {
                 "description": "✅ 启用日程表感知",
@@ -64,7 +64,7 @@
                 "templates": {
                     "time_slot": {
                         "name": "⏰ 时段",
-                        "hint": "定义一个时段的名称、时间和状态",
+                        "hint": "定义一个左闭右开 [开始时间, 结束时间) 的时段及其状态",
                         "items": {
                             "name": {
                                 "description": "🏷️ 名称",
@@ -76,13 +76,13 @@
                                 "description": "▶️ 开始时间（HH:MM）",
                                 "type": "string",
                                 "default": "00:00",
-                                "hint": "24 小时制；结束时间早于开始时间时视为跨午夜"
+                                "hint": "24 小时制；开始时刻计入当前时段（左闭）；结束时间早于开始时间时视为跨午夜"
                             },
                             "end_time": {
                                 "description": "⏹️ 结束时间（HH:MM）",
                                 "type": "string",
                                 "default": "06:00",
-                                "hint": "结束时刻不计入当前时段；跨午夜时表示次日时刻"
+                                "hint": "结束时刻不计入当前时段（右开）；跨午夜时表示次日时刻"
                             },
                             "state_prompt": {
                                 "description": "💬 状态描述(<SCHEDULE_STATE>)",
@@ -106,13 +106,13 @@
                                 "description": "▶️ 开始时间（HH:MM）",
                                 "type": "string",
                                 "default": "22:00",
-                                "hint": "24 小时制；结束时间早于开始时间时视为跨午夜"
+                                "hint": "24 小时制；开始时刻计入当前时段（左闭）；结束时间早于开始时间时视为跨午夜"
                             },
                             "end_time": {
                                 "description": "⏹️ 结束时间（HH:MM）",
                                 "type": "string",
                                 "default": "08:00",
-                                "hint": "结束时刻不计入当前时段；跨午夜时表示次日时刻"
+                                "hint": "结束时刻不计入当前时段（右开）；跨午夜时表示次日时刻"
                             },
                             "state_prompt": {
                                 "description": "💬 状态描述(<SCHEDULE_STATE>)",
@@ -124,7 +124,7 @@
                     }
                 },
                 "default": [],
-                "hint": "按列表顺序匹配；填写开始时间、结束时间和状态描述，例如 08:00–12:00「精神清醒」。结束时间早于开始时间表示跨午夜，如 22:00–08:00。时段重叠仅警告，并使用首个命中项"
+                "hint": "按列表顺序匹配，采用左闭右开 [开始时间, 结束时间)：例如 07:00–08:00 包含 07:00、不包含 08:00。相邻时段请让前一段结束时间与后一段开始时间一致，避免空档；结束时间早于开始时间表示跨午夜，如 22:00–08:00。时段重叠仅警告，并使用首个命中项"
             },
             "ai_generate_provider_id": {
                 "description": "🤖 AI 生成日程表使用的模型(provider_id)",

@@ -762,10 +762,12 @@ async function loadAbout() {
     const resp = await api.getAbout();
     if (resp.success) {
       state.about = resp;
-      document.getElementById('version-tag').textContent = resp.version || '1.0.0';
-      if (resp.display_name) {
-        document.getElementById('plugin-name-tag').textContent = resp.name || PLUGIN_NAME;
-      }
+      const version = String(resp.version || '').trim();
+      document.getElementById('version-tag').textContent = version
+        ? (version.toLowerCase().startsWith('v') ? version : `v${version}`)
+        : '—';
+      document.getElementById('plugin-name-tag').textContent =
+        resp.display_name || resp.name || PLUGIN_NAME;
     }
   } catch (e) { /* 静默：版本号非关键 */ }
 }

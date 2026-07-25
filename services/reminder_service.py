@@ -127,9 +127,9 @@ class ReminderService:
         persona_prompt = extract_persona_prompt(persona)
         if persona_prompt:
             system_parts.append(persona_prompt)
-        if self.time_context.time_guidance_enabled():
+        time_guidance_enabled = self.time_context.time_guidance_enabled()
+        if time_guidance_enabled:
             system_parts.append(DEFAULT_TIME_GUIDANCE_PROMPT)
-            system_parts.append(self.time_context.build_dynamic(session))
         system_prompt = "\n\n".join(system_parts)
 
         prompt_parts = self._build_task_prompt_parts(session, tasks)
@@ -143,7 +143,11 @@ class ReminderService:
                 str(late_minutes),
             )
             prompt = f"{prompt}\n\n{late_text}"
-        prompt += "\n\n（如需分多段表达，用空行分隔，每段将作为独立消息发出）"
+        # 直接调用 Context.llm_generate 不会进入 AstrBot 的 on_llm_request；
+        # 动态数据因此必须由主动路径自己追加到本轮 prompt 末尾。
+        if time_guidance_enabled:
+            now = self.time_context.now()
+            prompt = f"{prompt}\n\n{self.time_context.build_dynamic(session, now=now)}"
 
         provider_id = (
             self.config.get("reminder", {}).get("reminder_provider_id") or ""
