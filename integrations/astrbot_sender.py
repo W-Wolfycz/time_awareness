@@ -80,10 +80,20 @@ class AstrBotMessageSender:
     def __init__(self, context: Any):
         self.context = context
 
-    async def send_decorated(self, session: str, components: list) -> SendOutcome:
+    async def send_decorated(
+        self,
+        session: str,
+        components: list,
+        *,
+        sender_id: str = "",
+    ) -> SendOutcome:
         """运行装饰链并发送剩余消息链。"""
         try:
-            processed, event = await self._decorate(session, components)
+            processed, event = await self._decorate(
+                session,
+                components,
+                sender_id=sender_id,
+            )
         except Exception as e:
             logger.error(f"{tag()} ❌ 主动消息装饰链失败: {e}")
             return SendOutcome(False, str(e), side_effects_started=True)
@@ -104,12 +114,15 @@ class AstrBotMessageSender:
                 MessageChain(chain=processed),
             )
         except Exception as e:
-            return SendOutcome(False, str(e), side_effects_started=True)
+            # 装饰链未执行（platform_inst 缺失）时失败没有副作用，可安全重试
+            return SendOutcome(
+                False, str(e), side_effects_started=event is not None
+            )
         if not sent:
             return SendOutcome(
                 False,
                 f"找不到 session 对应的平台: {session}",
-                side_effects_started=True,
+                side_effects_started=event is not None,
             )
         if event and event.active_send_error:
             # BubbleReply 等装饰器会在单段失败后保留剩余结果，让最终发送仍可继续。
@@ -121,15 +134,12 @@ class AstrBotMessageSender:
             )
         return SendOutcome(True, side_effects_started=True)
 
-    async def decorate(self, session: str, components: list) -> list:
-        """兼容既有测试/调用方，仅返回装饰后的剩余组件。"""
-        processed, _ = await self._decorate(session, components)
-        return processed
-
     async def _decorate(
         self,
         session: str,
         components: list,
+        *,
+        sender_id: str = "",
     ) -> tuple[list, _ProactiveMessageEvent | None]:
         message_session = MessageSession.from_str(session)
         platform_inst = self.context.get_platform_inst(message_session.platform_id)
@@ -153,7 +163,14 @@ class AstrBotMessageSender:
         message_obj.session_id = target_id
         message_obj.message = list(components)
         message_obj.self_id = "bot"
-        message_obj.sender = MessageMember(user_id=target_id)
+        # 主动消息没有真实的入站发送者。群个人提醒用目标用户身份，供依赖
+        # sender_id 的装饰器正确选作用域；群广播及私聊主动消息保持空值。
+        synthetic_sender_id = (
+            str(sender_id or "").strip()
+            if message_session.message_type == MessageType.GROUP_MESSAGE
+            else ""
+        )
+        message_obj.sender = MessageMember(user_id=synthetic_sender_id)
         message_obj.message_str = ""
         message_obj.raw_message = None
         message_obj.message_id = ""

@@ -6,8 +6,9 @@
 - 用户上次发言时间（``on_llm_request`` 钩子写入，命令天然被过滤）
 - AI 上次发送时间（``after_message_sent`` 钩子写入，命令消息显式跳过）
 
-不集成 ``chat_memory``：避免跨插件耦合（``query_history`` 必传 ``conversation_id``，
-要复用 ``_get_curr_cid`` 私有 API）。
+记录本身不依赖 ``chat_memory``。当 ChatMemory 已对某轮请求实际执行上下文接管时，
+注入层会省略重复的 ``<LAST_CHAT>``；本追踪器仍继续记录，便于接管关闭或不可用时
+立即恢复时间间隔感知。
 
 数据结构（持久化到 ``last_chat_times.yaml``）::
 
@@ -25,6 +26,10 @@ import datetime
 
 from ._datafile import atomic_write_yaml, load_mapping
 from ..log import logger, tag
+
+# 上次对话记录保留期：超过 30 天未活跃的会话在 load/flush 时清理，
+# 避免 last_chat_times.yaml 与内存无限增长。
+_RETENTION_DAYS = 30
 
 
 _DEFAULT_FILENAME = "last_chat_times.yaml"
@@ -47,11 +52,35 @@ class LastChatTracker:
                 for k, v in sessions.items()
                 if isinstance(v, dict)
             }
+        self._cleanup_old()
         self._dirty = False
         logger.info(f"{tag()} 💬 上次对话时间记录已加载: {len(self._sessions)} 会话")
 
+    def _cleanup_old(self) -> int:
+        """清理超过保留期未活跃的会话（内存与落盘双清理）。"""
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            days=_RETENTION_DAYS
+        )
+        before = len(self._sessions)
+
+        def keep(entry: dict) -> bool:
+            latest = entry.get("ai") or entry.get("user") or ""
+            if not latest:
+                return True
+            try:
+                return datetime.datetime.fromisoformat(latest) >= cutoff
+            except (TypeError, ValueError):
+                # 解析失败（naive/坏格式）保守保留
+                return True
+
+        self._sessions = {
+            key: value for key, value in self._sessions.items() if keep(value)
+        }
+        return before - len(self._sessions)
+
     def flush(self) -> bool:
-        """立即把脏数据写盘。"""
+        """立即把脏数据写盘（写盘前清理过期会话）。"""
+        self._cleanup_old()
         if not self._dirty:
             return True
         ok = atomic_write_yaml(

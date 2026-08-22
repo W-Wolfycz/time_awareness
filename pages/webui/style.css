@@ -172,6 +172,13 @@ a:hover { color: var(--primary-hover); }
   z-index: 5;
 }
 .topbar-title { font-size: 16px; font-weight: 600; }
+.schedule-current-time {
+  margin-left: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
 .topbar-actions { display: flex; gap: 8px; align-items: center; }
 .content {
   padding: 24px;
@@ -242,6 +249,68 @@ a:hover { color: var(--primary-hover); }
 .badge-warning { background: var(--warning-soft); color: var(--warning-text); }
 .badge-danger { background: var(--danger-soft); color: var(--danger); }
 .badge-primary { background: var(--primary-soft); color: var(--primary); }
+.badge-muted { background: var(--surface-muted); color: var(--text-secondary); }
+
+.tasks-subtitle {
+  margin: 20px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.schedule-edit-hint {
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--primary-soft, #eef4ff);
+  color: var(--text-secondary, #5b6472);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 150px;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e3e7ee);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  display: none;
+}
+
+.dropdown-menu.open {
+  display: block;
+}
+
+.dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary, #1f2430);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dropdown-item:hover {
+  background: var(--surface-muted, #f2f4f8);
+}
+
+.row-finished td {
+  opacity: 0.78;
+}
 
 .chip {
   display: inline-flex;
@@ -913,4 +982,321 @@ select.form-input {
 }
 [data-theme="dark"] select.form-input {
   background-image: url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237d838f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+}
+
+/* ==================== 静态日程配置 ==================== */
+.static-schedules-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.static-schedules-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.static-schedules-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.static-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.static-warning-list {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  color: var(--warning-text);
+  background: var(--warning-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.static-schedule-table th:first-child,
+.static-schedule-table td:first-child {
+  width: 64px;
+  text-align: center;
+}
+.static-schedule-table .col-actions {
+  width: 230px;
+}
+.static-order {
+  display: inline-flex;
+  min-width: 28px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.static-state-preview {
+  max-width: 540px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.static-row-action {
+  min-width: 34px;
+  justify-content: center;
+}
+.static-delete {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+.static-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.static-time-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* ==================== 人格日程 ==================== */
+.schedules-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.schedules-toolbar .form-label {
+  margin: 0;
+}
+.schedules-toolbar .form-input {
+  min-width: 180px;
+}
+.schedule-meta {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 14px;
+  line-height: 1.7;
+}
+.schedule-origin-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.schedule-origin-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.schedule-origin-legend .slot-origin {
+  font-style: normal;
+}
+.schedule-slot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+@media (max-width: 720px) {
+  .static-schedules-toolbar,
+  .static-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .static-schedules-actions {
+    justify-content: flex-start;
+  }
+  .static-time-fields {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .static-state-preview {
+    max-width: none;
+    white-space: normal;
+  }
+  .static-schedule-table .col-actions {
+    width: auto;
+  }
+}
+
+/* 时段 Card */
+.slot-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s;
+}
+.slot-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.slot-time {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.slot-time-sep {
+  color: var(--text-muted);
+}
+.slot-badge {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+.slot-input {
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  width: 100%;
+}
+.slot-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+.slot-input-time {
+  width: 64px;
+  font-family: var(--mono);
+  text-align: center;
+}
+.slot-input-name {
+  font-weight: 600;
+}
+.slot-input-state {
+  resize: vertical;
+  line-height: 1.6;
+}
+.slot-name-text {
+  font-weight: 600;
+  font-size: 14px;
+}
+.slot-state-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+/* 状态配色 */
+.slot-finished {
+  opacity: 0.55;
+  filter: grayscale(0.9);
+}
+.slot-finished .slot-input,
+.slot-finished textarea {
+  pointer-events: none;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.slot-active {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+.slot-active .slot-badge {
+  color: var(--warning-text);
+  border-color: var(--warning);
+  background: var(--surface);
+}
+.slot-imminent {
+  opacity: 0.7;
+  border-style: dashed;
+}
+.slot-imminent .slot-input,
+.slot-imminent textarea {
+  pointer-events: none;
+  background: transparent;
+  border-color: transparent;
+}
+.slot-new {
+  border-color: var(--primary);
+  border-style: dashed;
+  background: var(--primary-soft);
+}
+.slot-new .slot-badge {
+  color: var(--primary);
+  border-color: var(--primary-border);
+  background: var(--surface);
+}
+
+/* 来源标记 chip */
+.slot-origin {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.slot-origin-ai {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-border);
+}
+.slot-origin-static {
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+}
+.slot-origin-user {
+  color: var(--success-text);
+  background: var(--success-soft);
+  border: 1px solid var(--success);
+}
+
+/* 日界状态摘要 */
+.schedule-boundary {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.boundary-chip {
+  font-size: 11px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--text-secondary);
+}
+.boundary-plans {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
 }

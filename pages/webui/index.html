@@ -22,7 +22,7 @@
     <!-- 侧边栏 -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <div class="sidebar-title">🕐 时间感知</div>
+        <div class="sidebar-title">🕐 时间感知增强</div>
         <div class="sidebar-subtitle">智能日历与主动提醒</div>
       </div>
       <nav class="sidebar-nav">
@@ -38,6 +38,14 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
           任务
         </button>
+        <button class="nav-item" data-view="static-schedules">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="7" cy="6" r="1"/><circle cx="11" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></svg>
+          静态日程
+        </button>
+        <button class="nav-item" data-view="schedules">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+          人格日程
+        </button>
       </nav>
       <div class="sidebar-footer">
         <div><span id="version-tag">—</span></div>
@@ -48,14 +56,19 @@
     <!-- 主内容区 -->
     <div class="app-main">
       <header class="topbar">
-        <div class="topbar-title" id="view-title">概览</div>
+        <div class="topbar-title">
+          <span id="view-title">概览</span>
+          <span id="schedule-current-time" class="schedule-current-time" style="display:none"></span>
+        </div>
         <div class="topbar-actions">
+          <button class="btn btn-ghost btn-sm" id="refresh-view" title="刷新当前视图">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+          </button>
           <button class="btn btn-ghost btn-sm" id="theme-toggle" title="切换主题">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
           </button>
-          <button class="btn btn-ghost btn-sm" id="refresh-btn" title="刷新">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-          </button>
+          <button class="btn btn-primary btn-sm" id="sch-add-slot-top" style="display:none">+ 新增时段</button>
+          <button class="btn btn-primary btn-sm" id="sch-save-top" style="display:none">保存修改</button>
         </div>
       </header>
 
@@ -93,6 +106,42 @@
             <button class="btn btn-primary btn-sm" id="task-create-btn">+ 新增任务</button>
           </div>
           <div id="tasks-content">
+            <div class="loading-wrap"><span class="spinner"></span> 加载中...</div>
+          </div>
+        </section>
+
+        <!-- ===== 日程 ===== -->
+        <section class="view" data-view="static-schedules">
+          <div class="static-schedules-toolbar">
+            <div class="static-schedules-hint">列表顺序即重叠时的优先级；跨午夜时结束时间可早于开始时间。</div>
+            <div class="static-schedules-actions">
+              <button class="btn btn-sm" id="static-reload">重新加载</button>
+              <div class="dropdown" id="static-add-dropdown">
+                <button class="btn btn-primary btn-sm" id="static-add-main">+ 新增时段 ▾</button>
+                <div class="dropdown-menu" id="static-add-menu">
+                  <button class="dropdown-item" type="button" data-preset="time_slot">⏰ 普通时段</button>
+                  <button class="dropdown-item" type="button" data-preset="sleep_slot">🌙 睡眠预设</button>
+                  <button class="dropdown-item" type="button" data-preset="lunch_slot">🍜 午餐预设</button>
+                  <button class="dropdown-item" type="button" data-preset="dinner_slot">🍲 晚餐预设</button>
+                </div>
+              </div>
+              <button class="btn btn-primary btn-sm" id="static-save">保存修改</button>
+            </div>
+          </div>
+          <div id="static-schedules-content">
+            <div class="loading-wrap"><span class="spinner"></span> 加载中...</div>
+          </div>
+        </section>
+
+        <!-- ===== 人格日程 ===== -->
+        <section class="view" data-view="schedules">
+          <div class="schedules-toolbar">
+            <label class="form-label">人格</label>
+            <select id="sch-persona" class="form-input"></select>
+            <label class="form-label">日期</label>
+            <select id="sch-date" class="form-input"></select>
+          </div>
+          <div id="schedules-content">
             <div class="loading-wrap"><span class="spinner"></span> 加载中...</div>
           </div>
         </section>
@@ -148,6 +197,37 @@
       <div class="modal-actions">
         <button class="btn" id="tf-cancel">取消</button>
         <button class="btn btn-primary" id="tf-submit">创建</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 静态日程单条编辑 modal：页面始终只挂载这一份输入控件 -->
+  <div class="modal-overlay" id="static-slot-modal">
+    <div class="modal" style="max-width: 620px;">
+      <div class="modal-title" id="static-slot-modal-title">编辑静态时段</div>
+      <div class="modal-body">
+        <div class="form-row">
+          <label class="form-label" for="sf-name">名称 <span class="form-hint">（最多 24 字）</span></label>
+          <input type="text" id="sf-name" class="form-input" maxlength="24" placeholder="如：晨起、午休、深夜" />
+        </div>
+        <div class="static-time-fields">
+          <div class="form-row">
+            <label class="form-label" for="sf-start">开始时间</label>
+            <input type="text" id="sf-start" class="form-input" maxlength="5" placeholder="HH:MM" />
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="sf-end">结束时间 <span class="form-hint">（允许 24:00）</span></label>
+            <input type="text" id="sf-end" class="form-input" maxlength="5" placeholder="HH:MM" />
+          </div>
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="sf-state">状态描述 <span class="form-hint">（最多 500 字）</span></label>
+          <textarea id="sf-state" class="form-input" rows="6" maxlength="500" placeholder="描述该时段的生理、情绪和回应风格"></textarea>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="sf-cancel">取消</button>
+        <button class="btn btn-primary" id="sf-submit">应用到草稿</button>
       </div>
     </div>
   </div>

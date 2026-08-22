@@ -1,23 +1,15 @@
-"""时间上下文组装服务。
+"""时间事实的 Prompt 与 Dashboard 渲染服务。
 
-保持既有架构决策：静态规则由 main 注入 system prompt；本服务只生成每轮动态
-状态数据。工作日、农历、黄历 sensor 与事件清单保持独立。
+静态规则仍由 ``main.py`` 注入 ``system_prompt``。本服务只把
+``TimeFactsCollector`` 的结构化事实渲染成当前轮动态标签、AI 生成输入或
+Dashboard DTO。
 """
+
+from __future__ import annotations
 
 from typing import Any, Callable
 
-from ..core.almanac_sensor import almanac_sensor
-from ..core.builtin_events import (
-    CATEGORY_INTERNATIONAL,
-    CATEGORY_LEGAL,
-    CATEGORY_POLITICAL,
-    CATEGORY_SOLAR_TERM,
-    CATEGORY_TRADITIONAL,
-)
-from ..core.lunar_sensor import lunar_sensor
-from ..core.workday_sensor import workday_sensor
-from ..log import logger, tag
-from ..utils.time_utils import find_active_schedule_slot, get_now
+from .time_facts_service import SensorFact, TimeFactsCollector
 
 
 class TimeContextService:
@@ -40,79 +32,73 @@ class TimeContextService:
         calendar_store,
         last_chat_tracker,
         now_provider: Callable[[], Any] | None = None,
+        facts_collector: TimeFactsCollector | None = None,
     ):
         self.config = config
-        self._astrbot_config_provider = astrbot_config_provider
         self.calendar_store = calendar_store
         self.last_chat_tracker = last_chat_tracker
-        self._now_provider = now_provider
+        self.facts = facts_collector or TimeFactsCollector(
+            config=config,
+            astrbot_config_provider=astrbot_config_provider,
+            calendar_store=calendar_store,
+            last_chat_tracker=last_chat_tracker,
+            now_provider=now_provider,
+        )
+
+    def set_daily_schedule_service(self, service) -> None:
+        """注入 AI 每日日程解析器，避免事实层反向构造 AstrBot 依赖。"""
+        self.facts.set_daily_schedule_service(service)
 
     def now(self):
-        if self._now_provider is not None:
-            return self._now_provider()
-        return get_now(self.config, self._astrbot_config_provider())
+        return self.facts.now()
 
     def time_guidance_enabled(self) -> bool:
-        return bool(self.config.get("time_awareness", {}).get("time_guidance_enabled", True))
+        return self.facts.time_guidance_enabled()
 
     def workday_enabled(self) -> bool:
-        return bool(self.config.get("time_awareness", {}).get("workday_state_enabled", True))
+        return self.facts.workday_enabled()
 
     def lunar_enabled(self) -> bool:
-        return bool(self.config.get("time_awareness", {}).get("lunar_state_enabled", True))
+        return self.facts.lunar_enabled()
 
     def almanac_enabled(self) -> bool:
-        return bool(self.config.get("time_awareness", {}).get("almanac_enabled", False))
+        return self.facts.almanac_enabled()
 
     def last_chat_enabled(self) -> bool:
-        return bool(self.config.get("time_awareness", {}).get("last_chat_enabled", True))
+        return self.facts.last_chat_enabled()
 
-    def build_dynamic(self, session: str | None = None, *, now=None) -> str:
-        """构造本轮动态状态；传入 ``now`` 时整轮复用同一时间快照。
-
-        现实时间标签采用与 AstrBot 同语义的 ``system_reminder`` 结构，
-        但使用本插件统一的大写标签和中文内容；主动消息不依赖 AstrBot 请求 Hook。
-        """
-        now = now or self.now()
+    def build_dynamic(
+        self,
+        session: str | None = None,
+        *,
+        now=None,
+        include_last_chat: bool = True,
+    ) -> str:
+        """把同一 ``now`` 快照渲染成本轮动态 XML 标签。"""
+        facts = self.facts.collect(
+            scope="conversation",
+            session=session,
+            now=now,
+            include_last_chat=include_last_chat,
+        )
         parts = []
         if self.time_guidance_enabled():
-            parts.append(self.build_datetime_reminder(now=now))
-        parts.append(
-            f"<SCHEDULE_STATE>{self.resolve_schedule_state(now=now)}</SCHEDULE_STATE>"
-        )
-        date = now.date()
-
-        if self.workday_enabled():
-            _, label = workday_sensor.classify(date)
-            parts.append(f"<WORKDAY_STATE>{label}</WORKDAY_STATE>")
-
-        if self.lunar_enabled():
-            lunar_text = lunar_sensor.describe(date)
-            if lunar_text:
-                parts.append(f"<LUNAR_STATE>{lunar_text}</LUNAR_STATE>")
-
-        if self.almanac_enabled():
-            almanac_text = almanac_sensor.describe(date)
-            if almanac_text:
-                parts.append(f"<ALMANAC_STATE>{almanac_text}</ALMANAC_STATE>")
-
-        events = self.today_events_text(now=now)
-        if events:
-            parts.append(f"<TODAY_EVENTS>{events}</TODAY_EVENTS>")
-
-        if self.last_chat_enabled() and session:
-            summary = self.last_chat_tracker.summary(session, now)
-            if summary:
-                parts.append(f"<LAST_CHAT>{summary}</LAST_CHAT>")
+            parts.append(self.build_datetime_reminder(now=facts.now))
+        parts.append(f"<SCHEDULE_STATE>{facts.schedule.state}</SCHEDULE_STATE>")
+        if facts.workday.available:
+            parts.append(f"<WORKDAY_STATE>{facts.workday.value}</WORKDAY_STATE>")
+        if facts.lunar.available:
+            parts.append(f"<LUNAR_STATE>{facts.lunar.value}</LUNAR_STATE>")
+        if facts.almanac.available:
+            parts.append(f"<ALMANAC_STATE>{facts.almanac.value}</ALMANAC_STATE>")
+        if facts.today_events.available and facts.today_events.value:
+            parts.append(f"<TODAY_EVENTS>{facts.today_events.value}</TODAY_EVENTS>")
+        if facts.last_chat.available:
+            parts.append(f"<LAST_CHAT>{facts.last_chat.value}</LAST_CHAT>")
         return "\n".join(parts)
 
     def build_datetime_reminder(self, *, now=None) -> str:
-        """构造本插件风格的当前时间提示。
-
-        这是 time_awareness 自己的现实时间感知数据。主动提醒直接调用
-        ``Context.llm_generate``，普通消息也通过本插件的动态内容注入；两条路径
-        都不依赖 AstrBot 是否开启同名配置。AstrBot 原生的小写标签不由本插件修改。
-        """
+        """构造插件自有的中文大写现实时间标签。"""
         now = now or self.now()
         display_now = now if now.tzinfo is not None else now.astimezone()
         current_time = display_now.strftime("%Y-%m-%d %H:%M")
@@ -125,52 +111,66 @@ class TimeContextService:
         )
 
     def today_events_text(self, *, now=None) -> str:
-        calendar_config = self.config.get("calendar", {})
-        if not calendar_config.get("enable_calendar", False):
-            return ""
-        now = now or self.now()
-        include_builtin = calendar_config.get("enable_builtin_events", True) and bool(
-            self.enabled_builtin_categories()
-        )
-        return self.calendar_store.today_text(now, include_builtin=include_builtin)
+        return self.facts.today_events_text(now=now or self.now())
 
-    def enabled_builtin_categories(self) -> list:
-        calendar_config = self.config.get("calendar", {})
-        if not calendar_config.get("enable_builtin_events", True):
-            return []
-        builtin_config = calendar_config.get("builtin_events", {})
-        result = []
-        if builtin_config.get("legal_holidays", True):
-            result.append(CATEGORY_LEGAL)
-        if builtin_config.get("traditional", True):
-            result.append(CATEGORY_TRADITIONAL)
-        if builtin_config.get("solar_terms", True):
-            result.append(CATEGORY_SOLAR_TERM)
-        if builtin_config.get("political", False):
-            result.append(CATEGORY_POLITICAL)
-        if builtin_config.get("international", False):
-            result.append(CATEGORY_INTERNATIONAL)
+    def enabled_builtin_categories(self) -> list[str]:
+        return self.facts.enabled_builtin_categories()
+
+    def resolve_schedule_state(self, *, now=None, session: str | None = None) -> str:
+        now = now or self.now()
+        return self.facts.resolve_schedule(now=now, session=session).state
+
+    @staticmethod
+    def _generation_sensor(fact: SensorFact, *, as_of: str, limit: int = 0) -> dict:
+        result = {
+            "enabled": fact.enabled,
+            "available": fact.available,
+            "as_of": as_of,
+        }
+        if fact.kind:
+            result["kind"] = fact.kind
+        if fact.available:
+            result["value"] = fact.value[:limit] if limit else fact.value
+        elif fact.error:
+            result["error"] = fact.error
         return result
 
-    def resolve_schedule_state(self, *, now=None) -> str:
-        daily_schedule = self.config.get("daily_schedule", {})
-        if not daily_schedule.get("enable_schedule", False):
-            return "未指定（按人设自然推断）"
-        now = now or self.now()
-        slot = find_active_schedule_slot(daily_schedule, now)
-        if slot is None:
-            logger.debug(f"{tag()} 日程表未命中任何时段（now={now.strftime('%H:%M')}）")
-            return "未指定（按人设自然推断）"
-        name = (slot.get("name") or "").strip()
-        state = (slot.get("state_prompt") or "").strip()
-        logger.debug(
-            f"{tag()} 日程表命中时段：name={name or '(无名)'} "
-            f"{slot.get('start_time')}-{slot.get('end_time')} state_prompt={len(state)}字"
-        )
-        return state or "未指定（按人设自然推断）"
+    def build_generation_sensor_snapshot(self, *, now=None) -> dict:
+        """构造 Persona 级 AI 日程传感器输入，不读取会话历史或当前日程。"""
+        facts = self.facts.collect(scope="persona_daily_generation", now=now)
+        as_of = facts.now.isoformat()
+        return {
+            "workday": self._generation_sensor(facts.workday, as_of=as_of),
+            "lunar": self._generation_sensor(facts.lunar, as_of=as_of),
+            "almanac": self._generation_sensor(facts.almanac, as_of=as_of),
+            "today_events": self._generation_sensor(
+                facts.today_events,
+                as_of=as_of,
+                limit=1000,
+            ),
+        }
+
+    @staticmethod
+    def _greeting(hour: int) -> str:
+        if 5 <= hour < 8:
+            return "早上好~"
+        if 8 <= hour < 11:
+            return "上午好~"
+        if 11 <= hour < 13:
+            return "中午好~"
+        if 13 <= hour < 17:
+            return "下午好~"
+        if 17 <= hour < 19:
+            return "傍晚好~"
+        if 19 <= hour < 23:
+            return "晚上好~"
+        if hour >= 23 or hour < 2:
+            return "深夜好~"
+        return "凌晨好~"
 
     def build_dashboard_time_info(self) -> dict:
-        now = self.now()
+        facts = self.facts.collect(scope="dashboard")
+        now = facts.now
         date = now.date()
         offset = now.utcoffset()
         if offset is not None:
@@ -181,60 +181,26 @@ class TimeContextService:
         else:
             tz_gmt = ""
 
-        hour = now.hour
-        if 5 <= hour < 8:
-            greeting = "早上好~"
-        elif 8 <= hour < 11:
-            greeting = "上午好~"
-        elif 11 <= hour < 13:
-            greeting = "中午好~"
-        elif 13 <= hour < 17:
-            greeting = "下午好~"
-        elif 17 <= hour < 19:
-            greeting = "傍晚好~"
-        elif 19 <= hour < 23:
-            greeting = "晚上好~"
-        elif hour >= 23 or hour < 2:
-            greeting = "深夜好~"
-        else:
-            greeting = "凌晨好~"
-
-        if self.workday_enabled():
-            workday_kind, workday_label = workday_sensor.classify(date)
-        else:
-            workday_kind, workday_label = "", ""
-
-        lunar_display = lunar_sensor.describe(date) if self.lunar_enabled() else ""
-        lunar_detail = (
-            lunar_sensor.describe_detailed(date)
-            if self.lunar_enabled()
-            else {"lunar_year_chip": "", "lunar_month_day": ""}
-        )
-        almanac_display = almanac_sensor.describe(date) if self.almanac_enabled() else ""
-        almanac_detail = (
-            almanac_sensor.describe_detailed(date)
-            if self.almanac_enabled()
-            else {"gz_day": "", "chong_sha": "", "yi": "", "ji": ""}
-        )
-
+        lunar_detail = facts.lunar.details
+        almanac_detail = facts.almanac.details
         return {
             "now_iso": now.isoformat(),
             "now_display": now.strftime("%Y/%m/%d %H:%M:%S"),
             "time_display": now.strftime("%H:%M:%S"),
             "tz_gmt": tz_gmt,
             "date_display": now.strftime("%Y/%m/%d"),
-            "greeting": greeting,
+            "greeting": self._greeting(now.hour),
             "weekday_display": self._WEEKDAY_CN[date.weekday()],
-            "workday_kind": workday_kind,
-            "workday_label": workday_label,
-            "lunar_display": lunar_display,
+            "workday_kind": facts.workday.kind,
+            "workday_label": facts.workday.value,
+            "lunar_display": facts.lunar.value,
             "lunar_year_chip": lunar_detail.get("lunar_year_chip", ""),
             "lunar_month_day": lunar_detail.get("lunar_month_day", ""),
-            "almanac_display": almanac_display,
+            "almanac_display": facts.almanac.value,
             "almanac_gz_day": almanac_detail.get("gz_day", ""),
             "almanac_chong_sha": almanac_detail.get("chong_sha", ""),
             "almanac_yi": almanac_detail.get("yi", ""),
             "almanac_ji": almanac_detail.get("ji", ""),
-            "lunar_enabled": self.lunar_enabled(),
-            "almanac_enabled": self.almanac_enabled(),
+            "lunar_enabled": facts.lunar.enabled,
+            "almanac_enabled": facts.almanac.enabled,
         }

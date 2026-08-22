@@ -9,17 +9,19 @@ AI 时间表生成器
 - LLM 调用封装在 ``generate_calendar_events`` 中，失败不抛出而是返回 ``None``。
 """
 
-import json
-import re
 from typing import Optional
 
 from ..log import logger, tag
 
 from ..constants import DEFAULT_AI_GENERATE_SYSTEM_PROMPT
+from .json_response import parse_json_response
 
 
 DEFAULT_MAX_GENERATE = 40
 _MAX_EVENT_TEXT_LENGTH = 200
+
+# 无年份上下文时按「年年可重复」口径校验各月天数上限（与 valid_month_day 一致）
+_MONTH_MAX_DAYS = {4: 30, 6: 30, 9: 30, 11: 30, 2: 29}
 
 
 def _coerce_event(raw: dict) -> Optional[dict]:
@@ -38,7 +40,7 @@ def _coerce_event(raw: dict) -> Optional[dict]:
         day = int(raw.get("day"))
     except (TypeError, ValueError):
         return None
-    if not (1 <= month <= 12 and 1 <= day <= 31):
+    if not (1 <= month <= 12 and 1 <= day <= _MONTH_MAX_DAYS.get(month, 31)):
         return None
 
     try:
@@ -66,29 +68,14 @@ def parse_generated_events(response_text: str) -> Optional[list]:
     if not response_text or not isinstance(response_text, str):
         return None
 
-    text = response_text.strip()
-
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
-
-    data = None
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\[.*\]", text, re.DOTALL)
-        if not match:
-            logger.warning(
-                f"{tag()} ⚠️ AI 生成时间表响应中未找到 JSON 数组: {text[:200]}"
-            )
-            return None
-        try:
-            data = json.loads(match.group())
-        except json.JSONDecodeError as e:
-            logger.warning(
-                f"{tag()} ⚠️ AI 生成时间表 JSON 解析失败: {e}, 原文: {text[:200]}"
-            )
-            return None
+        data = parse_json_response(response_text, allow_embedded_array=True)
+    except ValueError as exc:
+        logger.warning(
+            f"{tag()} ⚠️ AI 生成时间表 JSON 解析失败: {exc}, "
+            f"原文: {response_text}"
+        )
+        return None
 
     if isinstance(data, dict):
         data = data.get("events")
@@ -150,7 +137,7 @@ async def generate_calendar_events(
         logger.warning(f"{tag()} ⚠️ AI 生成时间表 LLM 返回空响应")
         return None
 
-    logger.debug(f"{tag()} AI 生成时间表原始响应: {response_text[:500]}")
+    logger.debug(f"{tag()} AI 生成时间表原始响应: {response_text}")
 
     events = parse_generated_events(response_text)
     if events is None:

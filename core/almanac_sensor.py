@@ -11,7 +11,7 @@
 - 黄历是「日历性质元信息」（每日都有一条，性质稳定），进独立 ``<ALMANAC_STATE>``
 
 无状态：``lunar_python`` 实时查，不需要 regen/跨年/store 机制，与 ``workday_sensor`` 同型。
-配置开关：``time_awareness.almanac_enabled``。
+配置开关：``time_awareness.time_sensors`` 多选勾选 ``almanac``（黄历）。
 """
 
 import datetime
@@ -28,12 +28,14 @@ class AlmanacSensor:
     失败/库未安装返回空串（调用方据此省略 XML 标签）。
     """
 
-    def describe(self, date: datetime.date) -> str:
+    def collect(self, date: datetime.date) -> tuple[str, dict]:
+        """一次计算同时返回 LLM 文本与 WebUI 结构化字段。"""
+        empty = {"gz_day": "", "chong_sha": "", "yi": "", "ji": ""}
         try:
             from lunar_python import Solar
         except ImportError:
             logger.warning(f"{tag()} ⚠️ lunar_python 库未安装，黄历感知降级")
-            return ""
+            return "", empty
         try:
             solar = Solar.fromYmd(date.year, date.month, date.day)
             lunar = solar.getLunar()
@@ -44,10 +46,21 @@ class AlmanacSensor:
             ji = lunar.getDayJi()
             yi_text = "、".join(yi[:4]) if yi else "无"
             ji_text = "、".join(ji[:4]) if ji else "无"
-            return f"黄历 {gz}日 冲{chong}煞{sha} 宜:{yi_text} 忌:{ji_text}"
+            return (
+                f"黄历 {gz}日 冲{chong}煞{sha} 宜:{yi_text} 忌:{ji_text}",
+                {
+                    "gz_day": f"{gz}日",
+                    "chong_sha": f"冲{chong}煞{sha}",
+                    "yi": "、".join((yi or [])[:3]),
+                    "ji": "、".join((ji or [])[:3]),
+                },
+            )
         except Exception as e:
             logger.warning(f"{tag()} ⚠️ AlmanacSensor 计算异常 {date}: {e}")
-            return ""
+            return "", empty
+
+    def describe(self, date: datetime.date) -> str:
+        return self.collect(date)[0]
 
     def describe_detailed(self, date: datetime.date) -> dict:
         """WebUI 用的拆分字段。
@@ -61,28 +74,7 @@ class AlmanacSensor:
 
         异常或库未安装时返回全空 dict，前端据此省略整行 chip。
         """
-        empty = {"gz_day": "", "chong_sha": "", "yi": "", "ji": ""}
-        try:
-            from lunar_python import Solar
-        except ImportError:
-            return empty
-        try:
-            solar = Solar.fromYmd(date.year, date.month, date.day)
-            lunar = solar.getLunar()
-            gz = lunar.getDayInGanZhi()
-            chong = lunar.getDayChongShengXiao()
-            sha = lunar.getDaySha()
-            yi_list = lunar.getDayYi() or []
-            ji_list = lunar.getDayJi() or []
-            return {
-                "gz_day": f"{gz}日",
-                "chong_sha": f"冲{chong}煞{sha}",
-                "yi": "、".join(yi_list[:3]),
-                "ji": "、".join(ji_list[:3]),
-            }
-        except Exception as e:
-            logger.warning(f"{tag()} ⚠️ AlmanacSensor.describe_detailed 异常 {date}: {e}")
-            return empty
+        return self.collect(date)[1]
 
 
 almanac_sensor = AlmanacSensor()  # 模块级单例，无状态可直接用

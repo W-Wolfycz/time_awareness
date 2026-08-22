@@ -1,7 +1,7 @@
 """农历感知——实时计算今日农历日期。
 
 与 ``workday_sensor`` 同型：无状态单例，``lunar_python`` 实时查。
-配置开关：``time_awareness.lunar_state_enabled``（默认开）。
+配置开关：``time_awareness.time_sensors`` 多选勾选 ``lunar``（农历，默认开）。
 
 返回格式：
 
@@ -26,13 +26,14 @@ _SX_EMOJI = {
 class LunarSensor:
     """返回今日农历中文描述。"""
 
-    def describe(self, date: datetime.date) -> str:
-        """LLM 注入用的完整农历字符串。"""
+    def collect(self, date: datetime.date) -> tuple[str, dict]:
+        """一次计算同时返回 LLM 文本与 WebUI 结构化字段。"""
+        empty = {"lunar_year_chip": "", "lunar_month_day": ""}
         try:
             from lunar_python import Solar
         except ImportError:
             logger.warning(f"{tag()} ⚠️ lunar_python 库未安装，农历感知降级")
-            return ""
+            return "", empty
         try:
             solar = Solar.fromYmd(date.year, date.month, date.day)
             lunar = solar.getLunar()
@@ -40,10 +41,21 @@ class LunarSensor:
             sx = lunar.getYearShengXiao()
             month_cn = lunar.getMonthInChinese()
             day_cn = lunar.getDayInChinese()
-            return f"农历{gz}{sx}年{month_cn}月{day_cn}"
+            sx_emoji = _SX_EMOJI.get(sx, sx)
+            return (
+                f"农历{gz}{sx}年{month_cn}月{day_cn}",
+                {
+                    "lunar_year_chip": f"{gz}{sx_emoji}年",
+                    "lunar_month_day": f"{month_cn}月{day_cn}",
+                },
+            )
         except Exception as e:
             logger.warning(f"{tag()} ⚠️ LunarSensor 计算异常 {date}: {e}")
-            return ""
+            return "", empty
+
+    def describe(self, date: datetime.date) -> str:
+        """LLM 注入用的完整农历字符串。"""
+        return self.collect(date)[0]
 
     def describe_detailed(self, date: datetime.date) -> dict:
         """WebUI 用的结构化农历数据。
@@ -56,26 +68,7 @@ class LunarSensor:
         异常或库未安装时返回 ``{"lunar_year_chip": "", "lunar_month_day": ""}``，
         前端据此省略 chip。
         """
-        empty = {"lunar_year_chip": "", "lunar_month_day": ""}
-        try:
-            from lunar_python import Solar
-        except ImportError:
-            return empty
-        try:
-            solar = Solar.fromYmd(date.year, date.month, date.day)
-            lunar = solar.getLunar()
-            gz = lunar.getYearInGanZhi()
-            sx = lunar.getYearShengXiao()
-            sx_emoji = _SX_EMOJI.get(sx, sx)  # 未命中映射则保留原字符
-            month_cn = lunar.getMonthInChinese()
-            day_cn = lunar.getDayInChinese()
-            return {
-                "lunar_year_chip": f"{gz}{sx_emoji}年",
-                "lunar_month_day": f"{month_cn}月{day_cn}",
-            }
-        except Exception as e:
-            logger.warning(f"{tag()} ⚠️ LunarSensor.describe_detailed 异常 {date}: {e}")
-            return empty
+        return self.collect(date)[1]
 
 
 lunar_sensor = LunarSensor()  # 模块级单例

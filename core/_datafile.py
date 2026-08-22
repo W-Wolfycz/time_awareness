@@ -15,7 +15,6 @@
   星平面 Unicode（如 emoji），使长消息可读性变差。
 """
 
-import json
 import os
 
 import yaml
@@ -78,7 +77,15 @@ def load_mapping(path: str):
         except UnicodeDecodeError:
             continue
         except yaml.YAMLError:
-            logger.error(f"{tag()} ❌ YAML 解析失败，文件可能已损坏: {path}")
+            # 保留损坏文件供人工排查，避免后续 save 用空数据覆盖
+            try:
+                os.replace(path, path + ".corrupt")
+            except OSError:
+                pass
+            logger.error(
+                f"{tag()} ❌ YAML 解析失败，文件可能已损坏: {path}"
+                "（原文件已保留为 .corrupt，请人工检查后删除）"
+            )
             return None
     else:
         logger.error(f"{tag()} ❌ 无法以任何编码读取文件: {path}")
@@ -91,8 +98,11 @@ def load_mapping(path: str):
 
 
 def atomic_write_yaml(path: str, data: dict, header: str | None = None) -> bool:
-    """原子性地将映射写入 YAML 文件。"""
-    temp_file = path + ".tmp"
+    """原子性地将映射写入 YAML 文件。
+
+    临时文件带 pid 后缀：多进程共享数据目录时避免互相覆盖对方的 .tmp。
+    """
+    temp_file = f"{path}.{os.getpid()}.tmp"
     try:
         with open(temp_file, "w", encoding="utf-8") as f:
             f.write(dump_yaml_str(data, header=header))
@@ -110,54 +120,3 @@ def atomic_write_yaml(path: str, data: dict, header: str | None = None) -> bool:
                 os.remove(temp_file)
             except OSError:
                 pass
-
-
-def _load_json_mapping(path: str):
-    """读取旧的 JSON 文件（多编码），返回 dict；失败返回 None"""
-    for encoding in _READ_ENCODINGS:
-        try:
-            with open(path, "r", encoding=encoding) as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-            logger.error(f"{tag()} ❌ 旧 JSON 根对象不是字典: {path}")
-            return None
-        except PermissionError:
-            logger.error(f"{tag()} ❌ 旧 JSON 读取权限不足: {path}")
-            return None
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-    logger.error(f"{tag()} ❌ 无法读取旧 JSON 文件: {path}")
-    return None
-
-
-def migrate_json_to_yaml(json_path: str, yaml_path: str):
-    """将旧的 JSON 持久化文件一次性迁移为 YAML。
-
-    仅当目标 YAML 不存在、且旧 JSON 存在时执行迁移：读取 JSON → 写出 YAML →
-    将旧 JSON 重命名为 ``<json_path>.bak`` 保留以便回滚。
-    """
-    if os.path.exists(yaml_path) or not os.path.exists(json_path):
-        return None
-
-    data = _load_json_mapping(json_path)
-    if data is None:
-        return None
-
-    if not atomic_write_yaml(yaml_path, data):
-        logger.error(f"{tag()} ❌ JSON→YAML 迁移写入失败: {json_path} -> {yaml_path}")
-        return None
-
-    try:
-        backup_path = json_path + ".bak"
-        if os.path.exists(backup_path):
-            os.remove(backup_path)
-        os.rename(json_path, backup_path)
-        logger.info(
-            f"{tag()} ✅ 已迁移 {os.path.basename(json_path)} → "
-            f"{os.path.basename(yaml_path)}（旧文件备份为 .bak）"
-        )
-    except OSError as e:
-        logger.warning(f"{tag()} ⚠️ 旧 JSON 备份失败（数据已迁移）: {e}")
-
-    return data

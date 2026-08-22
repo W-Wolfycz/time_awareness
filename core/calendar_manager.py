@@ -5,8 +5,8 @@
 读写完成后回填注入的 ``CalendarStore`` 实例，供 ``<TODAY_EVENTS>`` 标签注入使用。
 
 数据文件位于插件数据目录（``StarTools.get_data_dir``），全局共享一份时间表
-（不区分会话）。历史 ``calendar_data.json`` 会在首次加载时自动迁移为 YAML
-（旧文件备份为 ``.json.bak``）。
+（不区分会话）。持久化格式为 YAML（``calendar_data.yaml``）；不再支持历史
+``calendar_data.json`` 的自动迁移，运行时只认当前 YAML 格式。
 """
 
 import datetime
@@ -20,20 +20,17 @@ from ._datafile import (
     atomic_write_yaml,
     dump_yaml_str,
     load_mapping,
-    migrate_json_to_yaml,
 )
 from .calendar_store import (
     MAX_EVENT_TEXT_LENGTH,
     MAX_EVENTS,
     CalendarStore,
-    calendar_store,
     normalize_repeat,
     valid_month_day,
 )
 
 
 CALENDAR_FILE_NAME = "calendar_data.yaml"
-LEGACY_CALENDAR_FILE_NAME = "calendar_data.json"
 CALENDAR_DATA_VERSION = 1
 MIN_YEAR = 1970
 MAX_YEAR = 9999
@@ -47,15 +44,12 @@ class CalendarManager:
 
     def __init__(self, data_dir: str, store: CalendarStore | None = None):
         self.data_dir = data_dir
-        self.store = store or calendar_store
+        self.store = store if store is not None else CalendarStore()
 
     # ==================== 路径 ====================
 
     def _calendar_file_path(self) -> str:
         return os.path.join(self.data_dir, CALENDAR_FILE_NAME)
-
-    def _legacy_calendar_file_path(self) -> str:
-        return os.path.join(self.data_dir, LEGACY_CALENDAR_FILE_NAME)
 
     # ==================== 校验 / 规整 ====================
 
@@ -120,13 +114,9 @@ class CalendarManager:
     # ==================== 读 / 写 ====================
 
     def load(self) -> None:
-        """从 ``calendar_data.yaml`` 加载事项到内存单例（启动时调用）。
-
-        若 YAML 不存在但存在历史 ``calendar_data.json``，先一次性迁移为 YAML。
-        """
+        """从 ``calendar_data.yaml`` 加载事项到内存单例（启动时调用）。"""
         try:
             calendar_file = self._calendar_file_path()
-            migrate_json_to_yaml(self._legacy_calendar_file_path(), calendar_file)
 
             if not os.path.exists(calendar_file):
                 self.store.set_events([])
@@ -328,4 +318,5 @@ class CalendarManager:
         if not self.save():
             self.store.set_events(before)
             return -1
-        return len(incoming)
+        # merge 返回本次实际新增量；replace 返回替换后实际落库量。
+        return len(merged) if mode == "replace" else max(0, len(merged) - len(before))

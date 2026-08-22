@@ -7,12 +7,16 @@ from astrbot.api.message_components import At, Plain
 
 from ..constants import DEFAULT_LATE_PROMPT, DEFAULT_TIME_GUIDANCE_PROMPT
 from ..core.scheduler import TriggerResult
-from ..integrations.chat_memory_history import load_chat_memory_contexts
+from ..integrations.chat_memory_history import (
+    ChatMemoryContextState,
+    load_chat_memory_context_state,
+)
 from ..integrations.persona_resolver import (
     extract_persona_prompt,
     resolve_effective_persona,
 )
 from ..log import logger, tag
+from .adaptive_policy import AdaptiveConcurrencyGate
 from ..utils.time_utils import coerce_to_aware, get_now
 
 
@@ -28,6 +32,7 @@ class ReminderService:
         last_chat_tracker,
         astrbot_config_provider: Callable[[], Any],
         ensure_builtin_fresh: Callable[[], None],
+        concurrency_gate: AdaptiveConcurrencyGate | None = None,
     ):
         self.context = context
         self.config = config
@@ -37,24 +42,29 @@ class ReminderService:
         self.last_chat_tracker = last_chat_tracker
         self._astrbot_config_provider = astrbot_config_provider
         self._ensure_builtin_fresh = ensure_builtin_fresh
+        self._llm_gate = concurrency_gate
+
+    def _reminder_config(self) -> dict:
+        value = self.config.get("reminder", {})
+        return value if isinstance(value, dict) else {}
 
     def targets(self) -> list[str]:
-        targets = self.config.get("reminder", {}).get("reminder_targets", []) or []
+        targets = self._reminder_config().get("reminder_targets", []) or []
         if isinstance(targets, str):
             targets = [item.strip() for item in targets.split("\n") if item.strip()]
         return [str(item).strip() for item in targets if str(item).strip()]
 
     def late_prompt(self) -> str:
         text = (
-            self.config.get("reminder", {}).get("reminder_late_prompt") or ""
+            self._reminder_config().get("reminder_late_prompt") or ""
         ).strip()
         return text or DEFAULT_LATE_PROMPT
 
     def daily_greeting_without_events(self) -> bool:
         return bool(
-            self.config.get("reminder", {}).get(
+            self._reminder_config().get(
                 "daily_greeting_without_events",
-                False,
+                True,  # 默认开启：提醒开启而日历未配置时不会静默无提醒
             )
         )
 
@@ -106,7 +116,7 @@ class ReminderService:
             target_user_id=target_user_id,
         )
         logger.info(
-            f"{tag()} 🔌 外部任务创建: source={source or '-'} id={task.id[:8]} "
+            f"{tag()} 🔌 外部任务创建: source={source or '-'} id={task.id} "
             f"session={session} fire_at={fire_at.isoformat()}"
         )
         return task.id
@@ -119,6 +129,18 @@ class ReminderService:
         is_late: bool,
         late_minutes: int,
     ) -> TriggerResult:
+        # P0-2 隐私/身份防线：混合 @ 目标的 DueGroup 不得合并进同一 LLM prompt、
+        # ChatMemory 查询范围或 At。在产生任何 LLM/发送副作用前 fail-closed。
+        at_user_id = self._resolve_target_scope(session, tasks)
+        if at_user_id is None:
+            logger.warning(
+                f"{tag()} 🚫 到期组含多个不同 @ 目标的个人提醒，拒绝合并发送: "
+                f"session={session} tasks={len(tasks)}"
+            )
+            return TriggerResult.fail(
+                "到期组包含多个不同 @ 目标的个人提醒，已按 fail-closed 拒绝合并发送",
+                retryable=True,
+            )
         if any(task.kind == "calendar" for task in tasks):
             self._ensure_builtin_fresh()
 
@@ -143,14 +165,8 @@ class ReminderService:
                 str(late_minutes),
             )
             prompt = f"{prompt}\n\n{late_text}"
-        # 直接调用 Context.llm_generate 不会进入 AstrBot 的 on_llm_request；
-        # 动态数据因此必须由主动路径自己追加到本轮 prompt 末尾。
-        if time_guidance_enabled:
-            now = self.time_context.now()
-            prompt = f"{prompt}\n\n{self.time_context.build_dynamic(session, now=now)}"
-
         provider_id = (
-            self.config.get("reminder", {}).get("reminder_provider_id") or ""
+            self._reminder_config().get("reminder_provider_id") or ""
         ).strip()
         if not provider_id:
             try:
@@ -165,30 +181,53 @@ class ReminderService:
         if not provider_id:
             return TriggerResult.fail("无法确定会话 Provider", retryable=True)
 
-        at_user_id = self._target_user_id(session, tasks)
-        contexts = []
+        memory_state = ChatMemoryContextState([])
         if bool(
-            self.config.get("reminder", {}).get(
+            self._reminder_config().get(
                 "use_chat_memory_history",
                 False,
             )
         ):
-            contexts = await load_chat_memory_contexts(
+            memory_state = await load_chat_memory_context_state(
                 self.context,
                 session,
                 persona_id=persona_id,
                 user_id=at_user_id,
             )
 
-        try:
-            response = await self.context.llm_generate(
-                chat_provider_id=provider_id,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                contexts=contexts or None,
+        # 直接调用 Context.llm_generate 不会进入 AstrBot 的 on_llm_request；
+        # 动态数据因此必须由主动路径自己追加到本轮 prompt 末尾。ChatMemory takeover
+        # 已提供逐条 cm_time 时省略重复的 LAST_CHAT，但继续维护本地记录以便降级恢复。
+        if time_guidance_enabled:
+            now = self.time_context.now()
+            dynamic = self.time_context.build_dynamic(
+                session,
+                now=now,
+                include_last_chat=not memory_state.takeover_enabled,
             )
-        except Exception as e:
-            return TriggerResult.fail(f"LLM 调用失败: {e}", retryable=True)
+            prompt = f"{prompt}\n\n{dynamic}"
+
+        held = False
+        try:
+            if self._llm_gate is not None:
+                held = await self._llm_gate.acquire_configured(self.config)
+                if not held:
+                    return TriggerResult.fail(
+                        "插件全局 LLM 并发等待超时",
+                        retryable=True,
+                    )
+            try:
+                response = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    contexts=memory_state.contexts or None,
+                )
+            except Exception as e:
+                return TriggerResult.fail(f"LLM 调用失败: {e}", retryable=True)
+        finally:
+            if held:
+                await self._llm_gate.release()
         if not response or response.role != "assistant":
             return TriggerResult.fail("LLM 响应异常", retryable=True)
         reply = (response.completion_text or "").strip()
@@ -206,7 +245,11 @@ class ReminderService:
                 "无法持久化 delivery_started 状态，已中止发送",
                 retryable=True,
             )
-        outcome = await self.message_sender.send_decorated(session, components)
+        outcome = await self.message_sender.send_decorated(
+            session,
+            components,
+            sender_id=at_user_id,
+        )
         if not outcome.success:
             return TriggerResult.fail(
                 f"发送阶段失败: {outcome.error}",
@@ -237,10 +280,10 @@ class ReminderService:
                 calendar_added = True
                 now = get_now(self.config, self._astrbot_config_provider())
                 calendar_config = self.config.get("calendar", {})
+                if not isinstance(calendar_config, dict):
+                    calendar_config = {}
                 if calendar_config.get("enable_calendar", False):
-                    include_builtin = calendar_config.get(
-                        "enable_builtin_events", True
-                    ) and bool(self.time_context.enabled_builtin_categories())
+                    include_builtin = bool(self.time_context.enabled_builtin_categories())
                     events = self.time_context.calendar_store.events_for_date(
                         now.year,
                         now.month,
@@ -268,10 +311,26 @@ class ReminderService:
         return parts
 
     @staticmethod
-    def _target_user_id(session: str, tasks: list) -> str:
+    def _resolve_target_scope(session: str, tasks: list) -> str | None:
+        """返回到期组统一的 @ 目标身份 scope。
+
+        返回:
+            str: homogeneous scope —— 非群会话恒为 ``""``（会话本身即身份，不 At）；
+                群会话为所有个人任务（followup/user）唯一的 target_user_id
+                （全空即 ``""``，表示群公共消息不 At）。
+            None: 群会话下个人任务存在多个不同 target_user_id（含空串与具体
+                用户混合）。调用方必须 fail-closed，禁止把不同用户的个人提醒
+                合并进同一 LLM prompt / ChatMemory 范围 / At。
+
+        calendar 任务不携带个人身份，不参与 scope 判定，可与任意个人任务共存。
+        """
         if ":GroupMessage:" not in session:
             return ""
-        for task in tasks:
-            if task.kind in {"followup", "user"} and task.target_user_id:
-                return task.target_user_id
-        return ""
+        scopes = {
+            str(task.target_user_id or "").strip()
+            for task in tasks
+            if task.kind in {"followup", "user"}
+        }
+        if len(scopes) > 1:
+            return None
+        return scopes.pop() if scopes else ""

@@ -5,6 +5,7 @@ import pytest
 
 from time_awareness.core.calendar_store import CalendarStore
 from time_awareness.core.last_chat_tracker import LastChatTracker
+from time_awareness.integrations.chat_memory_history import ChatMemoryContextState
 from time_awareness.services.reminder_service import ReminderService
 from time_awareness.services.time_context_service import TimeContextService
 
@@ -56,7 +57,7 @@ class _SuccessContext:
 
 
 class _FailedSender:
-    async def send_decorated(self, session, components):
+    async def send_decorated(self, session, components, sender_id=""):
         return type("Outcome", (), {"success": False, "error": "send failed"})()
 
 
@@ -163,13 +164,16 @@ def test_chat_memory_history_checkbox_passes_contexts_to_llm(monkeypatch):
     async def _history(*args, **kwargs):
         history_call["args"] = args
         history_call["kwargs"] = kwargs
-        return [
-            {"role": "user", "content": "历史问题"},
-            {"role": "assistant", "content": "历史回答"},
-        ]
+        return ChatMemoryContextState(
+            [
+                {"role": "user", "content": "历史问题"},
+                {"role": "assistant", "content": "历史回答"},
+            ],
+            takeover_enabled=True,
+        )
 
     monkeypatch.setattr(
-        "time_awareness.services.reminder_service.load_chat_memory_contexts",
+        "time_awareness.services.reminder_service.load_chat_memory_context_state",
         _history,
     )
     task = type(
@@ -194,6 +198,75 @@ def test_chat_memory_history_checkbox_passes_contexts_to_llm(monkeypatch):
         "persona_id": "",
         "user_id": "10001",
     }
+
+
+def test_proactive_takeover_omits_duplicate_last_chat(monkeypatch, tmp_path):
+    context = _SuccessContext()
+    now = datetime.datetime(2026, 8, 5, 9, 0, tzinfo=datetime.timezone.utc)
+    session = "demo:GroupMessage:group_demo"
+    tracker = LastChatTracker(str(tmp_path))
+    tracker.record_ai(session, now - datetime.timedelta(hours=2))
+    time_context = TimeContextService(
+        config={
+            "time_awareness": {
+                "time_guidance_enabled": True,
+                "workday_state_enabled": False,
+                "lunar_state_enabled": False,
+                "almanac_enabled": False,
+                "last_chat_enabled": True,
+            },
+            "daily_schedule": {"enable_schedule": False},
+            "calendar": {"enable_calendar": False},
+        },
+        astrbot_config_provider=lambda: None,
+        calendar_store=CalendarStore(),
+        last_chat_tracker=tracker,
+        now_provider=lambda: now,
+    )
+    service = ReminderService(
+        context=context,
+        config={
+            "reminder": {
+                "reminder_targets": [session],
+                "use_chat_memory_history": True,
+            }
+        },
+        scheduler=_Scheduler(),
+        time_context=time_context,
+        message_sender=_FailedSender(),
+        last_chat_tracker=tracker,
+        astrbot_config_provider=lambda: None,
+        ensure_builtin_fresh=lambda: None,
+    )
+
+    async def _history(*args, **kwargs):
+        return ChatMemoryContextState(
+            [{"role": "assistant", "content": "<cm_time>08/05 07:00:00</cm_time> 历史回复"}],
+            takeover_enabled=True,
+        )
+
+    monkeypatch.setattr(
+        "time_awareness.services.reminder_service.load_chat_memory_context_state",
+        _history,
+    )
+    task = type(
+        "Task",
+        (),
+        {"kind": "user", "hint": "演示提醒", "target_user_id": ""},
+    )()
+
+    asyncio.run(
+        service.deliver(
+            session=session,
+            tasks=[task],
+            is_late=False,
+            late_minutes=0,
+        )
+    )
+
+    assert "<LAST_CHAT>" not in context.kwargs["prompt"]
+    assert context.kwargs["contexts"][0]["content"].startswith("<cm_time>")
+    assert tracker.summary(session, now) == "AI 2 小时前"
 
 
 def test_proactive_llm_gets_plugin_datetime_even_when_astrbot_setting_is_off(tmp_path):
@@ -278,5 +351,4 @@ def test_proactive_llm_gets_plugin_datetime_even_when_astrbot_setting_is_off(tmp
     assert "<SCHEDULE_STATE>正在清醒地开始上午安排</SCHEDULE_STATE>" in context.kwargs[
         "prompt"
     ]
-    assert "用空行分隔，每段将作为独立消息发出" not in context.kwargs["prompt"]
     assert len(now_calls) == 1

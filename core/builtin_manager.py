@@ -114,6 +114,15 @@ class BuiltinManager:
             生成的事件数量；保存失败返回 -1
         """
         events = generate_for_year(year, categories)
+        if not events and categories:
+            # 生成结果为空且分类启用：通常是 chinese_calendar 未覆盖该年份。
+            # 不覆盖已有数据、保持 stale，库升级覆盖后下次扫描自动重试；
+            # 否则空结果会落盘并被 is_stale 视为新鲜，此后永久静默缺数据。
+            logger.warning(
+                f"{tag()} ⚠️ 内置事件生成为空且分类已启用（可能 chinese_calendar "
+                f"未覆盖 {year} 年）：保留旧数据，下次扫描将重试"
+            )
+            return -1
         ok = self.save(year=year, events=events, categories=categories)
         if not ok:
             return -1

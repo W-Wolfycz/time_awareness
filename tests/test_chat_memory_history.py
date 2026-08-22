@@ -2,6 +2,9 @@ import asyncio
 from types import SimpleNamespace
 
 from time_awareness.integrations.chat_memory_history import (
+    CHAT_MEMORY_TAKEOVER_APPLIED_EXTRA,
+    is_chat_memory_takeover_applied,
+    load_chat_memory_context_state,
     load_chat_memory_contexts,
 )
 
@@ -79,6 +82,22 @@ def test_private_session_derives_user_id_and_disabled_takeover_is_empty():
     assert context.chat_memory.kwargs["user_id"] == "10001"
 
 
+def test_context_state_distinguishes_enabled_empty_takeover():
+    context = _Context()
+    context.chat_memory.result = []
+
+    state = asyncio.run(
+        load_chat_memory_context_state(
+            context,
+            "demo:FriendMessage:10001",
+            persona_id="persona_demo",
+        )
+    )
+
+    assert state.contexts == []
+    assert state.takeover_enabled is True
+
+
 def test_inactive_chat_memory_skips_history_injection():
     context = _Context(activated=False)
     contexts = asyncio.run(
@@ -90,3 +109,17 @@ def test_inactive_chat_memory_skips_history_injection():
     )
     assert contexts == []
     assert context.chat_memory.kwargs is None
+
+
+def test_event_extra_reports_actual_takeover_only():
+    class Event:
+        def __init__(self, applied):
+            self.applied = applied
+
+        def get_extra(self, key, default=None):
+            assert key == CHAT_MEMORY_TAKEOVER_APPLIED_EXTRA
+            return self.applied
+
+    assert is_chat_memory_takeover_applied(Event(True)) is True
+    assert is_chat_memory_takeover_applied(Event(False)) is False
+    assert is_chat_memory_takeover_applied(object()) is False

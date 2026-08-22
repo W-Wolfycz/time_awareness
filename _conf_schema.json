@@ -1,302 +1,722 @@
 {
-    "time_awareness": {
-        "description": "🕐 时间感知设置",
-        "type": "object",
-        "items": {
-            "time_guidance_enabled": {
-                "description": "✅ 启用时间感知增强（含现实时间）",
-                "type": "bool",
-                "default": true,
-                "hint": "由本插件向 LLM 提供当前公历日期、时间、时区、星期、时间规则、当前时段和当日事项；动态内容仅用于当前一轮，不写入对话历史。插件会独立注入现实时间；若 AstrBot「现实世界时间感知」已启用，建议关闭 AstrBot 对应开关以避免重复并节省 token"
-            },
-            "workday_state_enabled": {
-                "description": "📅 工作日性质感知",
-                "type": "bool",
-                "default": true,
-                "hint": "标注今天是工作日、周末、调休工作日或节假日"
-            },
-            "last_chat_enabled": {
-                "description": "💬 上次对话时间感知",
-                "type": "bool",
-                "default": true,
-                "hint": "告知 LLM 距上次用户发言和 AI 回复的相对时间；首次对话不注入"
-            },
-            "lunar_state_enabled": {
-                "description": "🌙 农历日期感知",
-                "type": "bool",
-                "default": true,
-                "hint": "向 LLM 提供今日农历日期"
-            },
-            "almanac_enabled": {
-                "description": "📜 黄历感知",
-                "type": "bool",
-                "default": false,
-                "hint": "向 LLM 提供今日干支、冲煞和宜忌；建议与农历感知一同启用"
-            },
-            "use_astrbot_timezone": {
-                "description": "🌐 跟随 AstrBot 时区",
-                "type": "bool",
-                "default": false,
-                "hint": "优先使用 AstrBot 全局时区；现实时间标签和其他传感器均使用最终生效时区；未配置时回退到下方时区"
-            },
-            "timezone": {
-                "description": "🕐 时区",
-                "type": "string",
-                "default": "",
-                "hint": "填写 IANA 时区，如 Asia/Shanghai；留空使用系统时区。跟随 AstrBot 时区失败时也会回退到此项"
-            }
-        }
-    },
-    "daily_schedule": {
-        "description": "🗓️ 单日日程表（时段状态感知）",
-        "type": "object",
-        "hint": "按时间段定义角色状态；时段采用左闭右开 [开始时间, 结束时间)，并向 LLM 提供当前命中的状态描述",
-        "items": {
-            "enable_schedule": {
-                "description": "✅ 启用日程表感知",
-                "type": "bool",
-                "default": false,
-                "hint": "向 LLM 提供当前命中时段的状态；未命中时由人设自然推断"
-            },
-            "schedule_templates": {
-                "description": "时段定义",
-                "type": "template_list",
-                "templates": {
-                    "time_slot": {
-                        "name": "⏰ 时段",
-                        "hint": "定义一个左闭右开 [开始时间, 结束时间) 的时段及其状态",
-                        "items": {
-                            "name": {
-                                "description": "🏷️ 名称",
-                                "type": "string",
-                                "default": "",
-                                "hint": "时段标签，如「晨起」「午休」「深夜」"
-                            },
-                            "start_time": {
-                                "description": "▶️ 开始时间（HH:MM）",
-                                "type": "string",
-                                "default": "00:00",
-                                "hint": "24 小时制；开始时刻计入当前时段（左闭）；结束时间早于开始时间时视为跨午夜"
-                            },
-                            "end_time": {
-                                "description": "⏹️ 结束时间（HH:MM）",
-                                "type": "string",
-                                "default": "06:00",
-                                "hint": "结束时刻不计入当前时段（右开）；跨午夜时表示次日时刻"
-                            },
-                            "state_prompt": {
-                                "description": "💬 状态描述(<SCHEDULE_STATE>)",
-                                "type": "text",
-                                "default": "",
-                                "hint": "建议 50–200 字，描述此时段的生理、情绪和语气状态；无需添加 XML 标签"
-                            }
-                        }
-                    },
-                    "sleep_slot": {
-                        "name": "🌙 睡眠时段（预设）",
-                        "hint": "预填 22:00–08:00 的跨午夜睡眠状态，可继续调整",
-                        "items": {
-                            "name": {
-                                "description": "🏷️ 名称",
-                                "type": "string",
-                                "default": "睡眠",
-                                "hint": "时段标签，仅用于展示和日志"
-                            },
-                            "start_time": {
-                                "description": "▶️ 开始时间（HH:MM）",
-                                "type": "string",
-                                "default": "22:00",
-                                "hint": "24 小时制；开始时刻计入当前时段（左闭）；结束时间早于开始时间时视为跨午夜"
-                            },
-                            "end_time": {
-                                "description": "⏹️ 结束时间（HH:MM）",
-                                "type": "string",
-                                "default": "08:00",
-                                "hint": "结束时刻不计入当前时段（右开）；跨午夜时表示次日时刻"
-                            },
-                            "state_prompt": {
-                                "description": "💬 状态描述(<SCHEDULE_STATE>)",
-                                "type": "text",
-                                "default": "刚被消息叫醒或正在半梦半醒之间。按人设自然回应——可带困意、含糊、迟疑、不情愿，但不拒绝对话；允许偶尔走神、把话说半句、打哈欠。",
-                                "hint": "建议 50–200 字，描述此时段的生理、情绪和语气状态；无需添加 XML 标签"
-                            }
-                        }
-                    }
-                },
-                "default": [],
-                "hint": "按列表顺序匹配，采用左闭右开 [开始时间, 结束时间)：例如 07:00–08:00 包含 07:00、不包含 08:00。相邻时段请让前一段结束时间与后一段开始时间一致，避免空档；结束时间早于开始时间表示跨午夜，如 22:00–08:00。时段重叠仅警告，并使用首个命中项"
-            },
-            "ai_generate_provider_id": {
-                "description": "🤖 AI 生成日程表使用的模型(provider_id)",
-                "type": "string",
-                "default": "",
-                "_special": "select_provider",
-                "hint": "用于 /schedule create；留空时使用当前会话模型"
-            },
-            "ai_generate_use_persona": {
-                "description": "🧑 人设 + 世界观联合输入",
-                "type": "bool",
-                "default": true,
-                "hint": "生成日程时结合当前会话人设和下方世界观；关闭后只使用世界观"
-            },
-            "ai_generate_worldview": {
-                "description": "🌍 世界观设定",
-                "type": "text",
-                "default": "",
-                "hint": "用于 /schedule create 的世界观或主题，如「末世废土」「蒸汽朋克都市」"
-            }
-        }
-    },
-    "calendar": {
-        "description": "📅 日历事项设置",
-        "type": "object",
-        "items": {
-            "enable_calendar": {
-                "description": "✅ 启用日历事项感知",
-                "type": "bool",
-                "default": false,
-                "hint": "向 LLM 提供当日事项；无事项时不注入相关内容"
-            },
-            "ai_generate_provider_id": {
-                "description": "🤖 AI 生成日历使用的模型(provider_id)",
-                "type": "string",
-                "default": "",
-                "_special": "select_provider",
-                "hint": "用于 /calendar create；留空时使用当前会话模型"
-            },
-            "ai_generate_worldview": {
-                "description": "🌍 默认世界观设定（可空）",
-                "type": "text",
-                "default": "",
-                "hint": "用于 /calendar create 的世界观或主题；每次生成都会覆盖当前日历"
-            },
-            "enable_builtin_events": {
-                "description": "✅ 启用内置现实日历事件",
-                "type": "bool",
-                "default": true,
-                "hint": "自动提供节假日、传统节日和节气等现实事件，每年更新"
-            },
-            "builtin_events": {
-                "description": "📅 内置事件分类开关",
-                "type": "object",
-                "items": {
-                    "legal_holidays": {
-                        "description": "🏷️ 法定节假日（含调休）",
-                        "type": "bool",
-                        "default": true,
-                        "hint": "元旦/春节/清明/劳动节/端午/中秋/国庆。数据来自 chinese_calendar 库（每年更新调休）。正日子当天显示「X 节」，调休日显示「X 节假期」"
-                    },
-                    "traditional": {
-                        "description": "🏮 传统农历节日",
-                        "type": "bool",
-                        "default": true,
-                        "hint": "元宵/龙抬头/上巳/七夕/中元/重阳/寒衣/下元/腊八/小年/除夕"
-                    },
-                    "solar_terms": {
-                        "description": "🌿 二十四节气",
-                        "type": "bool",
-                        "default": true,
-                        "hint": "立春/雨水/.../大寒 共 24 个，每月约 2 个"
-                    },
-                    "political": {
-                        "description": "🏛️ 政治纪念日",
-                        "type": "bool",
-                        "default": false,
-                        "hint": "植树节/五四青年节/教师节/建党节/建军节/抗战胜利纪念日/烈士纪念日/国家公祭日"
-                    },
-                    "international": {
-                        "description": "🌎 国际/西方节日",
-                        "type": "bool",
-                        "default": false,
-                        "hint": "情人节/妇女节/愚人节/儿童节/万圣节/平安夜/圣诞节/母亲节/父亲节/感恩节/复活节"
-                    }
-                }
-            }
-        }
-    },
-    "reminder": {
-        "description": "🔔 主动提醒设置",
-        "type": "object",
-        "items": {
-            "enable_reminder": {
-                "description": "✅ 启用主动提醒",
-                "type": "bool",
-                "default": false,
-                "hint": "按设定时间向白名单会话发送日历提醒，并允许 LLM 安排后续主动消息"
-            },
-            "reminder_targets": {
-                "description": "📋 提醒目标会话白名单(UMO)",
-                "type": "list",
-                "default": [],
-                "hint": "每行一个完整 UMO，如 aiocqhttp:GroupMessage:10001；主动提醒仅允许发送到这些会话"
-            },
-            "reminder_time": {
-                "description": "⏰ 当日日历事件发送时刻",
-                "type": "string",
-                "default": "09:00",
-                "hint": "24 小时制 HH:MM；到点后合并发送当日日历事项"
-            },
-            "daily_greeting_without_events": {
-                "description": "💬 无事件也发问候",
-                "type": "bool",
-                "default": false,
-                "hint": "当日没有日历事项时，仍在提醒时刻发送一条日常问候"
-            },
-            "reminder_max_late_minutes": {
-                "description": "⏳ 迟到容忍窗口（分钟）",
-                "type": "int",
-                "default": 60,
-                "hint": "任务迟到不超过此时间时仍会补发；超过后标记为过期"
-            },
-            "reminder_max_attempts": {
-                "description": "🔁 发送前失败最大尝试次数",
-                "type": "int",
-                "default": 3,
-                "hint": "发送前失败的最大尝试次数，范围 1–10；进入消息发送阶段后不自动重试"
-            },
-            "reminder_late_prompt": {
-                "description": "😅 迟到提示词",
-                "type": "text",
-                "default": "<LATE_PROMPT>\n你刚才承诺/计划在 {delay_minutes} 分钟前发这条消息，但错过了。请用符合人设的语气自然带出\"来晚了/让你等了\"等感受，不要刻意道歉过多，然后继续完成原本要说的话。\n</LATE_PROMPT>",
-                "hint": "补发时附加给 LLM；{delay_minutes} 会替换为实际迟到分钟数"
-            },
-            "followup_tool_enabled": {
-                "description": "🛠️ 向 LLM 注册 schedule_followup 工具",
-                "type": "bool",
-                "default": true,
-                "hint": "允许 LLM 安排稍后的主动消息；仅对白名单会话生效"
-            },
-            "use_chat_memory_history": {
-                "description": "🧠 主动提醒复用 ChatMemory 接管上下文",
-                "type": "bool",
-                "default": false,
-                "hint": "生成主动提醒时复用 ChatMemory 当前接管配置构建上下文。仅在 chat_memory 已安装、激活且开启上下文接管时生效"
-            },
-            "reminder_provider_id": {
-                "description": "🤖 主动提醒使用的模型(provider_id)",
-                "type": "string",
-                "default": "",
-                "_special": "select_provider",
-                "hint": "主动提醒使用的模型；留空时使用目标会话当前选择的模型"
-            }
-        }
-    },
-    "log": {
-        "description": "📝 日志设置",
-        "type": "object",
-        "items": {
-            "debug_to_info": {
-                "description": "🔬 调试日志提级（debug → info）",
-                "type": "bool",
-                "default": false,
-                "hint": "将本插件的 debug 日志按 info 输出，便于排查问题"
-            },
-            "log_with_bot_id": {
-                "description": "🤖 日志区分机器人实例",
-                "type": "bool",
-                "default": false,
-                "hint": "在日志前缀中加入平台实例标识，便于区分多个 Bot"
-            }
-        }
+  "log_with_bot_id": {
+    "description": "🤖 日志区分机器人实例",
+    "type": "bool",
+    "default": false,
+    "hint": "多 Bot 时在日志前缀区分平台实例（[time_awareness:bot-<self_id>]）；日志级别跟随 AstrBot 原生配置"
+  },
+  "runtime": {
+    "description": "⚙️ 全局运行时参数",
+    "type": "object",
+    "items": {
+      "llm_max_concurrency": {
+        "description": "🌐 插件 LLM 全局并发上限",
+        "type": "int",
+        "default": 0,
+        "hint": "AI 日程/主动提醒//calendar create 共用并发上限（1–4）；0=默认 1"
+      },
+      "state_retention_days": {
+        "description": "🗑️ 已结束任务保留期限",
+        "type": "int",
+        "default": 7,
+        "hint": "任务页「已结束」列表与后台每日锁的保留天数（1–365）；不影响日程快照保留"
+      }
     }
+  },
+  "time_awareness": {
+    "description": "🕐 时间感知设置",
+    "type": "object",
+    "items": {
+      "time_guidance_enabled": {
+        "description": "✅ 启用时间感知增强（含现实时间）",
+        "type": "bool",
+        "default": true,
+        "hint": "注入当前日期时间、时区、星期、时段与当日事项；动态内容仅当轮生效、不写入历史。建议关闭 AstrBot 自带现实时间感知避免重复"
+      },
+      "time_sensors": {
+        "description": "📅 时间传感器（多选）",
+        "type": "list",
+        "options": [
+          "workday",
+          "lunar",
+          "almanac"
+        ],
+        "labels": [
+          "工作日",
+          "农历",
+          "黄历"
+        ],
+        "default": [
+          "workday",
+          "lunar"
+        ],
+        "hint": "勾选即启用，全不选则都不注入。工作日｜农历｜黄历（黄历建议与农历同开）"
+      },
+      "last_chat_enabled": {
+        "description": "💬 上次对话时间感知",
+        "type": "bool",
+        "default": true,
+        "hint": "注入距上次发言/回复的相对时间；首次对话不注入；ChatMemory 接管本轮时自动省略重复标签"
+      },
+      "use_astrbot_timezone": {
+        "description": "🌐 跟随 AstrBot 时区",
+        "type": "bool",
+        "default": false,
+        "hint": "优先使用 AstrBot 全局时区；未配置时回退到下方时区"
+      },
+      "timezone": {
+        "description": "🕐 时区",
+        "type": "string",
+        "default": "",
+        "hint": "IANA 时区，如 Asia/Shanghai；留空使用系统时区"
+      },
+      "workday_state_enabled": {
+        "description": "📅 工作日性质感知",
+        "type": "bool",
+        "default": true,
+        "hint": "标注今天是工作日、周末、调休工作日或节假日",
+        "invisible": true
+      },
+      "lunar_state_enabled": {
+        "description": "🌙 农历日期感知",
+        "type": "bool",
+        "default": true,
+        "hint": "向 LLM 提供今日农历日期",
+        "invisible": true
+      },
+      "almanac_enabled": {
+        "description": "📜 黄历感知",
+        "type": "bool",
+        "default": false,
+        "hint": "向 LLM 提供今日干支、冲煞和宜忌；建议与农历感知一同启用",
+        "invisible": true
+      },
+      "_sensor_selector_migrated": {
+        "description": "传感器多选迁移标记（内部）",
+        "type": "bool",
+        "default": false,
+        "invisible": true
+      }
+    }
+  },
+  "reminder": {
+    "description": "🔔 主动提醒设置",
+    "type": "object",
+    "items": {
+      "enable_reminder": {
+        "description": "✅ 启用主动提醒",
+        "type": "bool",
+        "default": false,
+        "hint": "按设定时间向白名单会话发送日历提醒，并允许 LLM 安排后续消息"
+      },
+      "reminder_targets": {
+        "description": "📋 提醒目标会话白名单(UMO)",
+        "type": "list",
+        "default": [],
+        "condition": {
+          "enable_reminder": true
+        },
+        "hint": "每行一个 UMO，如 aiocqhttp:GroupMessage:10001；只发送到这些会话"
+      },
+      "reminder_time": {
+        "description": "⏰ 当日日历事件发送时刻",
+        "type": "string",
+        "default": "09:00",
+        "condition": {
+          "enable_reminder": true
+        },
+        "hint": "HH:MM；到点合并发送当日日历事项"
+      },
+      "daily_greeting_without_events": {
+        "description": "💬 无事件也发问候",
+        "type": "bool",
+        "default": true,
+        "condition": {
+          "enable_reminder": true
+        },
+        "hint": "无日历事项时仍在提醒时刻发一条问候（默认开启）"
+      },
+      "reminder_max_late_minutes": {
+        "description": "⏳ 迟到容忍窗口（分钟）",
+        "type": "int",
+        "default": 60,
+        "condition": {
+          "enable_reminder": true
+        },
+        "hint": "迟到不超过此分钟数仍补发；超过标记过期；0=不检查"
+      },
+      "reminder_max_attempts": {
+        "description": "🔁 发送前失败最大尝试次数",
+        "type": "int",
+        "default": 3,
+        "condition": {
+          "enable_reminder": true
+        },
+        "hint": "发送前失败最多重试次数（1–10）；进入发送阶段后不重试"
+      },
+      "reminder_late_prompt": {
+        "description": "😅 迟到提示词",
+        "type": "text",
+        "default": "<LATE_PROMPT>\n你刚才承诺/计划在 {delay_minutes} 分钟前发这条消息，但错过了。请用符合人设的语气自然带出\"来晚了/让你等了\"等感受，不要刻意道歉过多，然后继续完成原本要说的话。\n</LATE_PROMPT>",
+        "condition": {
+          "enable_reminder": true
+        },
+        "hint": "补发时附加给 LLM；{delay_minutes}=实际迟到分钟数"
+      },
+      "followup_tool_enabled": {
+        "description": "🛠️ 向 LLM 注册 schedule_followup 工具",
+        "type": "bool",
+        "default": true,
+        "condition": {
+          "enable_reminder": true
+        },
+        "hint": "允许 LLM 安排稍后的主动消息；仅白名单会话生效"
+      },
+      "use_chat_memory_history": {
+        "description": "🧠 主动提醒复用 ChatMemory 接管上下文",
+        "type": "bool",
+        "default": false,
+        "condition": {
+          "enable_reminder": true
+        },
+        "hint": "生成提醒时复用 ChatMemory 接管上下文；需 chat_memory 已装且接管开启"
+      },
+      "reminder_provider_id": {
+        "description": "🤖 主动提醒使用的模型(provider_id)",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "condition": {
+          "enable_reminder": true
+        },
+        "hint": "主动提醒模型；留空用目标会话当前模型"
+      }
+    }
+  },
+  "daily_schedule": {
+    "description": "🗓️ 单日日程表（时段状态感知）",
+    "type": "object",
+    "hint": "按时间段定义角色状态，向 LLM 提供当前命中的状态描述；时段左闭右开",
+    "items": {
+      "enable_schedule": {
+        "description": "✅ 启用日程表感知",
+        "type": "bool",
+        "default": false,
+        "hint": "向 LLM 提供当前命中时段的状态；AI 未命中时自动回退静态日程"
+      },
+      "schedule_templates": {
+        "description": "🧱 静态日程时段",
+        "type": "template_list",
+        "condition": {
+          "enable_schedule": true
+        },
+        "templates": {
+          "time_slot": {
+            "name": "⏰ 时段",
+            "hint": "定义一个左闭右开 [开始时间, 结束时间) 的时段及其状态",
+            "hide_hint_in_list": true,
+            "display_item": "name",
+            "items": {
+              "name": {
+                "description": "🏷️ 名称",
+                "type": "string",
+                "default": "",
+                "hint": "时段标签，如「晨起」「午休」「深夜」"
+              },
+              "start_time": {
+                "description": "▶️ 开始时间（HH:MM）",
+                "type": "string",
+                "default": "00:00",
+                "hint": "HH:MM；开始时刻计入时段；结束早于开始=跨午夜"
+              },
+              "end_time": {
+                "description": "⏹️ 结束时间（HH:MM）",
+                "type": "string",
+                "default": "06:00",
+                "hint": "HH:MM；结束时刻不计入时段；跨午夜=次日时刻"
+              },
+              "state_prompt": {
+                "description": "💬 状态描述(<SCHEDULE_STATE>)",
+                "type": "text",
+                "default": "",
+                "hint": "50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
+              }
+            }
+          },
+          "lunch_slot": {
+            "name": "🍜 午餐时段（预设）",
+            "hint": "预填 12:00–13:00 的午餐/午休状态（通用描写），可继续调整",
+            "hide_hint_in_list": true,
+            "display_item": "name",
+            "items": {
+              "name": {
+                "description": "🏷️ 名称",
+                "type": "string",
+                "default": "午餐",
+                "hint": "时段标签，仅用于展示和日志"
+              },
+              "start_time": {
+                "description": "▶️ 开始时间（HH:MM）",
+                "type": "string",
+                "default": "12:00",
+                "hint": "HH:MM；开始时刻计入时段；结束早于开始=跨午夜"
+              },
+              "end_time": {
+                "description": "⏹️ 结束时间（HH:MM）",
+                "type": "string",
+                "default": "13:00",
+                "hint": "HH:MM；结束时刻不计入时段；跨午夜=次日时刻"
+              },
+              "state_prompt": {
+                "description": "💬 状态描述(<SCHEDULE_STATE>)",
+                "type": "text",
+                "default": "正在吃午餐或刚结束午餐。按人设自然回应——可提及咀嚼、餐具、餐桌氛围、饭后犯困或午间小憩的打算，语气放松从容，不因进食打断对话节奏。",
+                "hint": "50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
+              }
+            }
+          },
+          "dinner_slot": {
+            "name": "🍲 晚餐时段（预设）",
+            "hint": "预填 18:30–19:30 的晚餐状态（通用描写），可继续调整",
+            "hide_hint_in_list": true,
+            "display_item": "name",
+            "items": {
+              "name": {
+                "description": "🏷️ 名称",
+                "type": "string",
+                "default": "晚餐",
+                "hint": "时段标签，仅用于展示和日志"
+              },
+              "start_time": {
+                "description": "▶️ 开始时间（HH:MM）",
+                "type": "string",
+                "default": "18:30",
+                "hint": "HH:MM；开始时刻计入时段；结束早于开始=跨午夜"
+              },
+              "end_time": {
+                "description": "⏹️ 结束时间（HH:MM）",
+                "type": "string",
+                "default": "19:30",
+                "hint": "HH:MM；结束时刻不计入时段；跨午夜=次日时刻"
+              },
+              "state_prompt": {
+                "description": "💬 状态描述(<SCHEDULE_STATE>)",
+                "type": "text",
+                "default": "正在吃晚餐或刚结束晚餐。按人设自然回应——可提及饭菜、餐桌氛围、饭后散步或收拾碗筷，语气松弛，带一点一天将尽的回味感，不打断对话节奏。",
+                "hint": "50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
+              }
+            }
+          },
+          "sleep_slot": {
+            "name": "🌙 睡眠时段（预设）",
+            "hint": "预填 22:00–08:00 的跨午夜睡眠状态，可继续调整",
+            "hide_hint_in_list": true,
+            "display_item": "name",
+            "items": {
+              "name": {
+                "description": "🏷️ 名称",
+                "type": "string",
+                "default": "睡眠",
+                "hint": "时段标签，仅用于展示和日志"
+              },
+              "start_time": {
+                "description": "▶️ 开始时间（HH:MM）",
+                "type": "string",
+                "default": "22:00",
+                "hint": "HH:MM；开始时刻计入时段；结束早于开始=跨午夜"
+              },
+              "end_time": {
+                "description": "⏹️ 结束时间（HH:MM）",
+                "type": "string",
+                "default": "08:00",
+                "hint": "HH:MM；结束时刻不计入时段；跨午夜=次日时刻"
+              },
+              "state_prompt": {
+                "description": "💬 状态描述(<SCHEDULE_STATE>)",
+                "type": "text",
+                "default": "刚被消息叫醒或正在半梦半醒之间。按人设自然回应——可带困意、含糊、迟疑、不情愿，但不拒绝对话；允许偶尔走神、把话说半句、打哈欠。",
+                "hint": "50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
+              }
+            }
+          }
+        },
+        "default": [],
+        "hint": "按列表顺序左闭右开匹配，结束早于开始=跨午夜；AI 不写回；也可在 Plugin Page 分页管理"
+      },
+      "ai_daily": {
+        "description": "🤖 AI 每日日程",
+        "type": "object",
+        "condition": {
+          "enable_schedule": true
+        },
+        "hint": "按「当前 Persona + 本地日期」生成当天冻结快照；首次遇到新 Persona 异步补生成",
+        "items": {
+          "enabled": {
+            "description": "✅ 启用 AI 每日日程",
+            "type": "bool",
+            "default": false,
+            "hint": "每天按日期、世界观、人设与传感器生成日程；默认关闭，避免升级后自动调用模型"
+          },
+          "provider_id": {
+            "description": "🤖 使用的模型",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider",
+            "condition": {
+              "enabled": true
+            },
+            "hint": "生成模型；留空用 AstrBot 全局默认 Provider"
+          },
+          "use_persona": {
+            "description": "🧑 使用当前 Persona",
+            "type": "bool",
+            "default": true,
+            "condition": {
+              "enabled": true
+            },
+            "hint": "把当前 Persona prompt 作为生成依据，建议开启；关闭仍按 Persona 身份隔离"
+          },
+          "worldview": {
+            "description": "🌍 世界观 / 长期背景",
+            "type": "text",
+            "default": "",
+            "condition": {
+              "enabled": true
+            },
+            "hint": "稳定的时代/地点/职业/生活背景；每日变化主题由模型自行生成"
+          },
+          "max_attempts": {
+            "description": "🔁 单步 LLM 最大尝试次数",
+            "type": "int",
+            "default": 3,
+            "condition": {
+              "enabled": true
+            },
+            "hint": "1–5，含首次；作用于角色状态评估、方案生成与重复检测/评选，不会整套流程重复"
+          },
+          "generation_time": {
+            "description": "⏰ 每日生成时刻",
+            "type": "string",
+            "default": "00:05",
+            "condition": {
+              "enabled": true
+            },
+            "hint": "HH:MM 当天生成当天；-HH:MM 前一天提前生成次日（如 -23:30 今晚生成明天）"
+          },
+          "max_slots": {
+            "description": "📏 AI 最大时段数",
+            "type": "int",
+            "default": 24,
+            "condition": {
+              "enabled": true
+            },
+            "hint": "模型最大时段数（1–48）；默认提示约 8-12 段，允许留空档"
+          },
+          "retention_days": {
+            "description": "🗃️ 快照保留天数",
+            "type": "int",
+            "default": 30,
+            "condition": {
+              "enabled": true
+            },
+            "hint": "快照保留天数（1–365，含当天）；不存原始 ID/prompt/历史"
+          },
+          "ai_priority_over_static": {
+            "description": "🛡️ AI 优先于静态日程",
+            "type": "bool",
+            "default": false,
+            "condition": {
+              "enabled": true
+            },
+            "hint": "关=静态优先；开=AI 优先（用户层始终最高）"
+          },
+          "ai_generation": {
+            "description": "",
+            "type": "object",
+            "invisible": true,
+            "hint": "旧分组兼容副本；首次加载时迁移到 AI 每日日程的直接字段",
+            "items": {
+              "provider_id": {
+                "description": "",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider"
+              },
+              "use_persona": {
+                "description": "",
+                "type": "bool",
+                "default": true
+              },
+              "worldview": {
+                "description": "",
+                "type": "text",
+                "default": ""
+              },
+              "max_attempts": {
+                "description": "",
+                "type": "int",
+                "default": 3
+              }
+            }
+          },
+          "adaptive": {
+            "description": "🔄 自适应每日日程",
+            "type": "object",
+            "condition": {
+              "enabled": true
+            },
+            "hint": "让日程在稳定习惯上产生有因果的日变化；全关时与基线一致（一次调用）",
+            "items": {
+              "enabled": {
+                "description": "✅ 启用自适应增强",
+                "type": "bool",
+                "default": false,
+                "hint": "自适应总开关；关闭时走基线单次调用流程"
+              },
+              "recent_days": {
+                "description": "🗓️ 参考最近日程天数",
+                "type": "int",
+                "default": 0,
+                "condition": {
+                  "enabled": true
+                },
+                "hint": "0=关闭；1–30=注入最近 N 天日程摘要并反重复"
+              },
+              "state_continuity_enabled": {
+                "description": "🧩 角色状态连续性",
+                "type": "bool",
+                "default": false,
+                "condition": {
+                  "enabled": true
+                },
+                "hint": "开启时先做角色状态评估（Step1）再生成方案（Step2），并参与连续性评分；关闭时只按反重复排序"
+              },
+              "candidate_count": {
+                "description": "🎯 规划方案数",
+                "type": "int",
+                "default": 1,
+                "condition": {
+                  "enabled": true
+                },
+                "hint": "独立生成方案数（1–5）"
+              },
+              "candidate_selection": {
+                "description": "⚖️ 方案选择方式",
+                "type": "string",
+                "default": "heuristic",
+                "options": [
+                  "heuristic",
+                  "llm"
+                ],
+                "condition": {
+                  "enabled": true
+                },
+                "hint": "heuristic=本地评分不增调用；llm=额外模型评选，失败回退 heuristic；方案数>1 才生效"
+              },
+              "context_token_budget": {
+                "description": "📏 增强上下文 Token 上限",
+                "type": "int",
+                "default": 0,
+                "condition": {
+                  "enabled": true
+                },
+                "hint": "增强上下文 Token 上限；0=自动按 Provider 窗口 80% 分配（取不到回退 8000）"
+              },
+              "max_concurrent_llm": {
+                "description": "🌐 全局并发上限（旧位置·兼容回退）",
+                "type": "int",
+                "default": 1,
+                "invisible": true,
+                "hint": "旧位置兼容回退：顶层 runtime.llm_max_concurrency 优先（范围 1–4），该新键未配置或为 0 时才使用此值。AI 日程、主动提醒与 /calendar create 共用该插件级闸门，不影响 AstrBot 或其他插件"
+              },
+              "acquire_timeout_seconds": {
+                "description": "⏳ 并发等待超时",
+                "type": "int",
+                "default": 10,
+                "condition": {
+                  "enabled": true
+                },
+                "hint": "等并发槽位超时秒数（0–120）；超时回退旧快照/静态日程，不阻塞消息"
+              },
+              "_removed_priority_option": {
+                "description": "",
+                "type": "bool",
+                "default": false,
+                "invisible": true
+              }
+            }
+          }
+        }
+      },
+      "ai_generation": {
+        "description": "",
+        "type": "object",
+        "invisible": true,
+        "hint": "最早版本的兼容副本；首次加载时迁移到 daily_schedule.ai_daily 的直接生成字段",
+        "items": {
+          "provider_id": {
+            "description": "🤖 使用的模型",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider",
+            "hint": "留空时使用 AstrBot 全局默认 Provider（不从会话临时 Provider 猜测）"
+          },
+          "use_persona": {
+            "description": "🧑 使用当前 Persona",
+            "type": "bool",
+            "default": true,
+            "hint": "默认且建议保持开启：生成时输入当前实际生效 Persona。关闭仅表示不把 Persona prompt 发给规划模型，AI 每日日程仍必须有 Persona ID 用于身份隔离"
+          },
+          "worldview": {
+            "description": "🌍 世界观 / 长期背景",
+            "type": "text",
+            "default": "",
+            "hint": "稳定的世界设定、时代、职业环境或长期生活背景；每日 theme 会由模型在此背景下另行生成，不需要每天修改"
+          },
+          "max_attempts": {
+            "description": "🔁 单步 LLM 最大尝试次数",
+            "type": "int",
+            "default": 3,
+            "hint": "范围 1–5，包含首次调用；分别用于角色状态评估、方案生成、重复检测与评选，不会整套工作流乘法重跑"
+          }
+        }
+      },
+      "_ai_generation_migrated": {
+        "description": "",
+        "type": "bool",
+        "default": false,
+        "invisible": true
+      },
+      "_ai_generation_flat_migrated": {
+        "description": "",
+        "type": "bool",
+        "default": false,
+        "invisible": true
+      }
+    }
+  },
+  "calendar": {
+    "description": "📅 日历事项设置",
+    "type": "object",
+    "items": {
+      "enable_calendar": {
+        "description": "✅ 启用日历事项感知",
+        "type": "bool",
+        "default": false,
+        "hint": "注入当日事项；无事项不注入"
+      },
+      "ai_generate_provider_id": {
+        "description": "🤖 AI 生成日历使用的模型(provider_id)",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "/calendar create 使用的模型；留空用当前会话模型"
+      },
+      "ai_generate_worldview": {
+        "description": "🌍 默认世界观设定（可空）",
+        "type": "text",
+        "default": "",
+        "hint": "/calendar create 的世界观；生成会替换全部自定义事项，不影响内置事件"
+      },
+      "ai_generate_max_events": {
+        "description": "🔢 AI 日历单次生成事项上限",
+        "type": "int",
+        "default": 40,
+        "hint": "/calendar create 单次生成的自定义事项条数上限（1–200）；值会写入生成提示词"
+      },
+      "builtin_event_categories": {
+        "description": "🏷️ 内置现实事件分类（多选）",
+        "type": "list",
+        "options": [
+          "legal_holidays",
+          "traditional",
+          "solar_terms",
+          "political",
+          "international"
+        ],
+        "labels": [
+          "法定节假日（含调休）",
+          "传统农历节日",
+          "二十四节气",
+          "政治纪念日",
+          "国际/西方节日"
+        ],
+        "default": [
+          "legal_holidays",
+          "traditional",
+          "solar_terms"
+        ],
+        "hint": "勾选任意分类即启用内置现实事件，全不选则关闭；每年自动更新"
+      },
+      "enable_builtin_events": {
+        "description": "✅ 启用内置现实日历事件",
+        "type": "bool",
+        "default": true,
+        "hint": "自动提供节假日、传统节日和节气等现实事件，每年更新",
+        "invisible": true
+      },
+      "builtin_events": {
+        "description": "📅 内置事件分类开关",
+        "type": "object",
+        "items": {
+          "legal_holidays": {
+            "description": "🏷️ 法定节假日（含调休）",
+            "type": "bool",
+            "default": true,
+            "hint": "元旦/春节/清明/劳动节/端午/中秋/国庆。数据来自 chinese_calendar 库（每年更新调休）。正日子当天显示「X 节」，调休日显示「X 节假期」"
+          },
+          "traditional": {
+            "description": "🏮 传统农历节日",
+            "type": "bool",
+            "default": true,
+            "hint": "元宵/龙抬头/上巳/七夕/中元/重阳/寒衣/下元/腊八/小年/除夕"
+          },
+          "solar_terms": {
+            "description": "🌿 二十四节气",
+            "type": "bool",
+            "default": true,
+            "hint": "立春/雨水/.../大寒 共 24 个，每月约 2 个"
+          },
+          "political": {
+            "description": "🏛️ 政治纪念日",
+            "type": "bool",
+            "default": false,
+            "hint": "植树节/五四青年节/教师节/建党节/建军节/抗战胜利纪念日/烈士纪念日/国家公祭日"
+          },
+          "international": {
+            "description": "🌎 国际/西方节日",
+            "type": "bool",
+            "default": false,
+            "hint": "情人节/妇女节/愚人节/儿童节/万圣节/平安夜/圣诞节/母亲节/父亲节/感恩节/复活节"
+          }
+        },
+        "invisible": true
+      },
+      "_builtin_selector_migrated": {
+        "description": "内置事件多选迁移标记（内部）",
+        "type": "bool",
+        "default": false,
+        "invisible": true
+      }
+    }
+  },
+  "log": {
+    "description": "📝 日志设置",
+    "type": "object",
+    "items": {
+      "log_with_bot_id": {
+        "description": "🤖 日志区分机器人实例",
+        "type": "bool",
+        "default": false,
+        "hint": "在日志前缀中加入平台实例标识，便于区分多个 Bot"
+      },
+      "_log_group_migrated": {
+        "description": "日志分组迁移标记（内部）",
+        "type": "bool",
+        "default": false,
+        "invisible": true
+      }
+    },
+    "invisible": true
+  }
 }

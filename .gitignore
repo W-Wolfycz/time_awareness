@@ -2,16 +2,21 @@ __pycache__
 *.pyc
 .pytest_cache/
 
-# 个人维护用架构记录，不进入仓库
+# 开发文档与脚本只留在本地工作区，不进 GitHub 仓库：
+# docs/（项目上下文、测试策略、Hooks 调研与历史审阅归档）、
+# scripts/（演示流程与测试端数据库读写工具及其生成产物）。
 docs/
+scripts/
 
 # 运行时数据文件（fallback 路径下可能落到仓库目录；正常路径在 data/plugin_data/ 下）
 builtin_events.yaml
 calendar_data.yaml
 reminder_tasks.yaml
 last_chat_times.yaml
+daily_schedule_snapshots.yaml
+# v1.10.0 起 Persona 维度 HMAC secret（旧名 daily_schedule_profile_secret.yaml 已废弃）
+daily_schedule_persona_secret.yaml
 data/
 
 # Logo 生成过程的参考图、提示词和候选输出不属于插件运行时。
 logo-assets/
-

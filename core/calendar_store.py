@@ -26,6 +26,8 @@
 - ``REPEAT_FOREVER``（-1）：每年重复（永久），忽略年份，仅按月-日匹配。
 """
 
+import calendar as _cal
+
 from ..log import logger, tag
 
 
@@ -38,14 +40,28 @@ _MONTH_MAX_DAYS = {
     7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31,
 }
 
+
+def _month_day_count(year: int, month: int) -> int:
+    """指定年份月份的实际天数（2 月按闰年）。"""
+    try:
+        return _cal.monthrange(int(year), int(month))[1]
+    except (TypeError, ValueError):
+        return _MONTH_MAX_DAYS.get(int(month), 30)
+
 MAX_EVENT_TEXT_LENGTH = 200
 MAX_EVENTS = 2000
 
 
-def valid_month_day(month: int, day: int) -> bool:
-    """校验 (month, day) 是否为合法的「年年可重复」日期。"""
+def valid_month_day(month: int, day: int, year: int | None = None) -> bool:
+    """校验 (month, day) 是否为合法日期。
+
+    ``year`` 提供时按该年的实际天数校验（非闰年 2 月拒绝 29 日）；
+    缺省按「年年可重复」的上限校验（2 月允许 29）。
+    """
     if month not in _MONTH_MAX_DAYS:
         return False
+    if year is not None:
+        return 1 <= day <= _month_day_count(year, month)
     return 1 <= day <= _MONTH_MAX_DAYS[month]
 
 
@@ -77,8 +93,6 @@ def event_active_in_year(event: dict, year: int) -> bool:
 class CalendarStore:
     """时间表事项内存存储。
 
-    v1.8.0 起插件实例通过依赖注入持有独立 Store；模块底部仍保留默认实例，
-    兼容第三方代码直接导入 ``calendar_store`` 的历史用法。
     """
 
     def __init__(self):
@@ -138,11 +152,14 @@ class CalendarStore:
         return result
 
     def events_for_month(self, year: int, month: int, include_builtin: bool = True) -> list:
-        """返回指定月份生效的事项（按日期升序，同日保持顺序）。"""
+        """返回指定月份生效的事项（按日期升序，同日保持顺序）。
+
+        只迭代该年该月的实际天数，不产生 2-29/4-31 等幽灵日期。
+        """
         # 复用 events_for_date 拿每天的列表，避免去重逻辑漂移
         result = []
         seen_keys = set()
-        for day in range(1, 32):
+        for day in range(1, _month_day_count(year, month) + 1):
             day_events = self.events_for_date(year, month, day, include_builtin=include_builtin)
             for e in day_events:
                 key = (e.get("day", 0), e.get("text", ""), e.get("source", ""))
@@ -160,6 +177,3 @@ class CalendarStore:
         if not texts:
             return ""
         return separator.join(texts)
-
-
-calendar_store = CalendarStore()
