@@ -576,7 +576,7 @@ class ReminderScheduler:
             task for task in self._tasks if task.id not in removed_ids
         ]
         self.save()  # 同步移除队列文件中已到期的终态任务
-        logger.info(
+        logger.debug(
             f"{tag()} 🧹 清理 {len(removed)} 个超过 {self._state_retention_days} "
             "天保留期的终态任务"
         )

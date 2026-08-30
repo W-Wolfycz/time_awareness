@@ -38,6 +38,7 @@ from .daily_schedule_generation import (
     PROMPT_REVISION,
     DailyScheduleGeneration,
     DailyScheduleGenerationError,
+    exception_detail,
 )
 from ..log import logger, tag
 
@@ -96,6 +97,7 @@ class DailyScheduleService:
         generation_service: DailyScheduleGeneration | None = None,
         concurrency_gate: AdaptiveConcurrencyGate | None = None,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+        weather_forecast_provider: Callable[[datetime.date], Awaitable[dict | None]] | None = None,
     ):
         self.context = context
         self.config = config
@@ -111,6 +113,7 @@ class DailyScheduleService:
             sleep=sleep,
         )
         self._sleep = sleep
+        self._weather_forecast_provider = weather_forecast_provider
         self._available = True
         # 进程内身份缓存：session → (persona_hash, persona 对象)
         # （原始 UMO 与 Persona prompt 不落盘，只在内存）
@@ -206,7 +209,7 @@ class DailyScheduleService:
         for key in stale:
             self._locks.pop(key, None)
         if stale:
-            logger.info(
+            logger.debug(
                 f"{tag()} AI 每日日程：回收 {len(stale)} 个过期未占用的生成锁"
             )
         return len(stale)
@@ -389,7 +392,7 @@ class DailyScheduleService:
             if session in stale
         ]:
             self._representative_sessions.pop(persona_hash, None)
-        logger.info(
+        logger.debug(
             f"{tag()} AI 每日日程：清理 {len(stale)} 个一整天未活跃的会话"
         )
 
@@ -565,10 +568,12 @@ class DailyScheduleService:
         成功快照就绪后 ``save_ready`` 会清除 failure，熔断随之解除。
         """
         if not self.enabled():
+            logger.debug(f"{tag()} 跳过排队：AI 每日日程未启用")
             return False
         session = str(session or "").strip()
         persona_hash = self._identity_for(session)
         if not persona_hash:
+            logger.debug(f"{tag()} 跳过排队：Persona 未解析（空身份） session={session}")
             return False
         persona = self._identity_object_for(session)
         # 注意：排队本身不是 UMO「出现」，不刷新保活时间戳（活跃时间
@@ -580,14 +585,26 @@ class DailyScheduleService:
         timezone = self._timezone_key(target_now)
         snapshot = self.store.get(persona_hash, local_date, timezone)
         if not force and self._snapshot_usable(snapshot, target_now, persona_hash):
+            logger.debug(
+                f"{tag()} 跳过排队：当日快照已可用 "
+                f"persona={self._identity_id_for(session)} date={local_date.isoformat()}"
+            )
             return False
         # 日级熔断：本日已有持久化终态 failure → 抑制自动生成（调用风暴防护）。
         # 先判快照可用再判 failure：同 key 同时存在 usable 快照时以快照为准。
         if not force and self.store.get_failure(persona_hash, local_date, timezone):
+            logger.debug(
+                f"{tag()} 跳过排队：本日已熔断（存在终态 failure） "
+                f"persona={self._identity_id_for(session)} date={local_date.isoformat()}"
+            )
             return False
         task_key = self.store.snapshot_key(persona_hash, local_date, timezone)
         current = self._tasks.get(task_key)
         if current is not None and not current.done():
+            logger.debug(
+                f"{tag()} 跳过排队：已有进行中的生成任务 "
+                f"persona={self._identity_id_for(session)} date={local_date.isoformat()}"
+            )
             return False
         frozen = FrozenIdentity(
             session=session,
@@ -601,8 +618,13 @@ class DailyScheduleService:
         try:
             task = asyncio.create_task(self._generate_with_retries(frozen, force=force))
         except RuntimeError:
+            logger.debug(f"{tag()} 排队失败：事件循环不可用（RuntimeError）")
             return False
         self._tasks[task_key] = task
+        logger.debug(
+            f"{tag()} 已排队生成: persona={frozen.persona_id} "
+            f"date={local_date.isoformat()} force={force}"
+        )
 
         def _done(done_task: asyncio.Task) -> None:
             if self._tasks.get(task_key) is done_task:
@@ -642,6 +664,10 @@ class DailyScheduleService:
         for persona_hash, session in personas.items():
             if self.queue_generation(session, target_date=target_date):
                 queued += 1
+        logger.debug(
+            f"{tag()} 每日生成扫描: 保活会话 {len(sessions)} → "
+            f"解析出 {len(personas)} 个 Persona，排队 {queued} 个"
+        )
         return queued
 
     async def _generate_with_retries(
@@ -743,11 +769,18 @@ class DailyScheduleService:
                     now=now,
                     finalize_previous=local_date <= actual_now.date(),
                 )
+                forecast = None
+                if self._weather_forecast_provider is not None:
+                    try:
+                        forecast = await self._weather_forecast_provider(local_date)
+                    except Exception:
+                        forecast = None
                 generated = await self.generation.generate(
                     session=session,
                     now=now,
                     enhanced=enhanced,
                     persona=persona,
+                    forecast=forecast,
                 )
 
                 generated_at = (
@@ -819,9 +852,12 @@ class DailyScheduleService:
                 logger.info(
                     f"{tag()} ✅ AI 每日日程就绪: persona={persona_label} "
                     f"date={local_date.isoformat()} source={generated.source} "
-                    f"slots={len(generated.slots)} provider={generated.provider_id} "
-                    f"calls={generated.calls_executed} "
-                    f"skipped={skipped} context_tokens={generated.context_tokens} "
+                    f"slots={len(generated.slots)}"
+                )
+                logger.debug(
+                    f"{tag()} 生成细节: provider={generated.provider_id} "
+                    f"calls={generated.calls_executed} skipped={skipped} "
+                    f"context_tokens={generated.context_tokens} "
                     f"boundary_state={'yes' if generated.boundary_state else 'no'}"
                 )
                 return GenerationResult(
@@ -838,10 +874,12 @@ class DailyScheduleService:
                     actual_now,
                     exc.error_type,
                     timezone,
+                    detail=exc.detail,
                 )
                 logger.warning(
                     f"{tag()} ⚠️ AI 每日日程生成失败: persona={persona_label} "
                     f"date={local_date.isoformat()} error={exc.error_type}"
+                    + (f" detail={exc.detail}" if exc.detail else "")
                 )
                 return GenerationResult(
                     False,
@@ -857,10 +895,12 @@ class DailyScheduleService:
                     actual_now,
                     type(exc).__name__,
                     timezone,
+                    detail=exception_detail(exc),
                 )
                 logger.warning(
                     f"{tag()} ⚠️ AI 每日日程未知失败: persona={persona_label} "
-                    f"date={local_date.isoformat()} error={type(exc).__name__}"
+                    f"date={local_date.isoformat()} error={type(exc).__name__} "
+                    f"detail={exception_detail(exc)}"
                 )
                 return GenerationResult(
                     False,
@@ -951,8 +991,15 @@ class DailyScheduleService:
                 if isinstance(slot, dict)
             ]
             entries.append({"date": str(snapshot.get("local_date", "")), "slots": slots})
-            # 反重复/相似度消费的动态时间线（含用户修改后的实际生效版本）
-            rendered_snapshots.append({"slots": rendered})
+            # 反重复/相似度消费的动态时间线（含用户修改后的实际生效版本）；
+            # 携带 boundary_state/local_date 供 Step1 最近主题反重复提取。
+            rendered_snapshots.append(
+                {
+                    "slots": rendered,
+                    "boundary_state": snapshot.get("boundary_state") or {},
+                    "local_date": str(snapshot.get("local_date", "") or ""),
+                }
+            )
         return (
             json.dumps(entries, ensure_ascii=False, sort_keys=True),
             tuple(rendered_snapshots),
@@ -1083,6 +1130,7 @@ class DailyScheduleService:
         now: datetime.datetime,
         error_type: str,
         timezone: str = "",
+        detail: str = "",
     ) -> None:
         failed_at = now if now.tzinfo is not None else now.astimezone()
         self.store.record_failure(
@@ -1091,6 +1139,7 @@ class DailyScheduleService:
             local_date=local_date,
             failed_at=failed_at.isoformat(),
             error_type=error_type,
+            detail=detail,
             retention_days=self.retention_days(),
             today=now.date(),
         )
@@ -1133,7 +1182,7 @@ class DailyScheduleService:
                     days=target_day_offset
                 )
                 queued = await self.queue_known_profiles(target_date=target_date)
-                logger.info(
+                logger.debug(
                     f"{tag()} 🗓️ AI 每日日程定时扫描完成: "
                     f"target_date={target_date.isoformat()} queued={queued}"
                 )

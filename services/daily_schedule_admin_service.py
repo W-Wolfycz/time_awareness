@@ -317,7 +317,7 @@ class DailyScheduleAdminService:
                 today=local_date,
             ):
                 raise SchedulePersistenceError("日程修改已通过校验，但快照持久化失败")
-            logger.info(
+            logger.debug(
                 f"{tag()} ✍️ 人格日程已人工修改: persona={persona_hash} "
                 f"date={local_date.isoformat()} slots={len(updated['slots'])}"
             )
@@ -401,7 +401,7 @@ class DailyScheduleAdminService:
                 today=local_date,
             ):
                 raise SchedulePersistenceError("删除已通过校验，但快照持久化失败")
-            logger.info(
+            logger.debug(
                 f"{tag()} 🗑️ 人格日程用户时段已删除: persona={persona_hash} "
                 f"date={local_date.isoformat()} slot={user_slot_id}"
             )

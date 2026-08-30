@@ -385,10 +385,10 @@ def test_adaptive_disabled_is_baseline_single_call(tmp_path):
         assert block not in prompt
     snapshot = store.get(store.persona_hash("persona_demo"), NOW.date(), "UTC")
     assert "theme" not in snapshot  # theme 已并入 boundary
-    # 存储恒全维度：基线模式写入全 null 种子（8 键齐全）
+    # 存储恒全维度：基线模式写入全 null 种子（9 键齐全）
     assert set(snapshot["boundary_state"]) == {
         "energy", "sleep_debt", "focus", "social_energy", "motivation",
-        "physical_state", "daily_theme", "unfinished_plans",
+        "physical_state", "daily_theme", "daily_style", "unfinished_plans",
     }
     assert all(v is None for v in snapshot["boundary_state"].values())
 
@@ -605,13 +605,16 @@ def test_fill_boundary_empty_object_inherits_previous_state():
     assert filled["energy"] == 50
     assert filled["sleep_debt"] == 10
     assert filled["daily_theme"] == "常规日"
+    # 上次状态没有 daily_style 时回填为 null（新维度向后兼容）
+    assert filled["daily_style"] is None
     # 无历史时 {} 回填为全 null 种子
     empty = DailyScheduleGeneration._fill_boundary({}, SimpleNamespace(previous_day_state={}))
     assert set(empty) == {
         "energy", "sleep_debt", "focus", "social_energy", "motivation",
-        "physical_state", "daily_theme", "unfinished_plans",
+        "physical_state", "daily_theme", "daily_style", "unfinished_plans",
     }
     assert empty["energy"] is None
+    assert empty["daily_style"] is None
 
 
 def test_multi_candidate_judge_failure_falls_back_deterministic(tmp_path):
@@ -859,6 +862,21 @@ def test_multi_candidate_partial_failure_uses_valid(tmp_path):
     # 合法候选 SLOTS_A 被采用；00:00-06:00 冻结为空，剩余从 07:30 起
     assert snapshot["ai_slots"][0]["name"] == "晨起"
     assert snapshot["ai_slots"][0]["start"] == "07:30"
+
+
+def test_failure_record_carries_underlying_detail(tmp_path):
+    """生成失败时失败记录保留底层异常全文，供部署端诊断。"""
+    config = _adaptive_config()
+    # 三次规划尝试全部失败（耗尽后 Fake 会返回合法空日程，必须喂满失败响应）
+    context = FakeContext(["not-json", "not-json", "not-json"])
+    service, store = _service(tmp_path, config, context, sleep=_no_sleep)
+
+    result = asyncio.run(service.generate_for_session(SESSION, now=NOW))
+    assert not result.success
+    assert result.error_type == "invalid_output"
+    failure = store.get_failure(store.persona_hash("persona_demo"), NOW.date(), "UTC")
+    assert failure is not None
+    assert "输出不是合法 JSON" in failure["detail"]
 
 
 # ==================== 复检回归（重试 / 冻结竞态 / 预算丢弃 / 时区归一化） ====================
@@ -1122,3 +1140,134 @@ def test_antirepeat_failure_keeps_candidate_in_multi_candidate(tmp_path):
     assert len(context.plan_calls) == 2 + 3  # 2 候选 + 3 次反重复尝试
     snapshot = store.get(persona_hash, NOW.date(), "UTC")
     assert snapshot["ai_slots"][0]["name"] == "晨起"
+
+
+# ==================== 2.1.0 丰富度：池注入 / 最近主题反重复 / 结构反同构 ====================
+
+
+def test_boundary_prompt_injects_pools_and_recent_themes(tmp_path):
+    """主题/风格池与最近主题反重复注入 Step1；allow_custom 影响 instruction。"""
+    config = _adaptive_config(
+        adaptive={
+            "enabled": True,
+            "state_continuity_enabled": True,
+            "recent_days": 3,
+            "theme_pool": ["演习日", "远征日"],
+            "style_pool": ["沉稳", "元气"],
+            "allow_custom_theme": False,
+        },
+    )
+    context = FakeContext([json.dumps(SLOTS_A, ensure_ascii=False)])
+    service, store = _service(tmp_path, config, context, sleep=_no_sleep)
+
+    # 昨日快照带 theme/style，作为 RECENT_THEMES 数据源
+    yesterday = NOW.date() - datetime.timedelta(days=1)
+    persona_hash = store.persona_hash("persona_demo")
+    store.save_ready(
+        {
+            "snapshot_id": "yesterday",
+            "persona_hash": persona_hash,
+            "local_date": yesterday.isoformat(),
+            "timezone": "UTC",
+            "status": "ready",
+            "executed_until": "24:00",
+            "executed_slots": [],
+            "user_slots": [],
+            "ai_slots": [
+                {"name": "睡眠", "start": "00:00", "end": "08:00", "state": "睡觉"},
+            ],
+            "static_slots": [],
+            "slots": [
+                {"name": "睡眠", "start": "00:00", "end": "08:00", "state": "睡觉"},
+            ],
+            "boundary_state": {
+                "energy": 30,
+                "daily_theme": "港区休整日",
+                "daily_style": "慵懒",
+            },
+        },
+        retention_days=30,
+        today=NOW.date(),
+    )
+
+    result = asyncio.run(service.generate_for_session(SESSION, now=NOW))
+    assert result.success
+    boundary_prompt = context.boundary_calls[0]["prompt"]
+    assert "THEME_POOL" in boundary_prompt
+    assert "演习日" in boundary_prompt and "远征日" in boundary_prompt
+    assert "不得自创" in boundary_prompt  # allow_custom_theme=False
+    assert "STYLE_POOL" in boundary_prompt and "沉稳" in boundary_prompt
+    assert "RECENT_THEMES" in boundary_prompt
+    assert "港区休整日" in boundary_prompt and "慵懒" in boundary_prompt
+
+
+def test_boundary_prompt_omits_pools_when_empty(tmp_path):
+    """池为空列表时不注入对应块（清空=关闭维度）。"""
+    config = _adaptive_config(
+        adaptive={
+            "enabled": True,
+            "state_continuity_enabled": True,
+            "theme_pool": [],
+            "style_pool": [],
+        },
+    )
+    context = FakeContext([json.dumps(SLOTS_A, ensure_ascii=False)])
+    service, _ = _service(tmp_path, config, context, sleep=_no_sleep)
+
+    result = asyncio.run(service.generate_for_session(SESSION, now=NOW))
+    assert result.success
+    boundary_prompt = context.boundary_calls[0]["prompt"]
+    assert "THEME_POOL" not in boundary_prompt
+    assert "STYLE_POOL" not in boundary_prompt
+    assert "RECENT_THEMES" not in boundary_prompt  # recent_days=0 不注入
+
+
+def test_structure_identical_triggers_antirepeat_regeneration(tmp_path):
+    """结构签名相同（内容不同）的候选触发定向重生成，治「骨架复读」。"""
+    same_structure = json.dumps(
+        [
+            {"name": "晨起", "start": "07:00", "end": "08:00", "state": "刚睡醒"},
+            {"name": "早餐", "start": "08:00", "end": "09:00", "state": "正在吃饭"},
+        ],
+        ensure_ascii=False,
+    )
+    regenerated = json.dumps(
+        [{"name": "外出", "start": "06:00", "end": "19:00", "state": "在外面"}],
+        ensure_ascii=False,
+    )
+    config = _adaptive_config(adaptive={"enabled": True, "recent_days": 3})
+    context = FakeContext([same_structure, regenerated])
+    service, store = _service(tmp_path, config, context, sleep=_no_sleep)
+
+    yesterday = NOW.date() - datetime.timedelta(days=1)
+    persona_hash = store.persona_hash("persona_demo")
+    store.save_ready(
+        {
+            "snapshot_id": "yesterday",
+            "persona_hash": persona_hash,
+            "local_date": yesterday.isoformat(),
+            "timezone": "UTC",
+            "status": "ready",
+            "executed_until": "24:00",
+            "executed_slots": [],
+            "user_slots": [],
+            "ai_slots": [
+                {"name": "a", "start": "07:00", "end": "08:00", "state": "x"},
+                {"name": "b", "start": "08:00", "end": "09:00", "state": "y"},
+            ],
+            "static_slots": [],
+            "slots": [
+                {"name": "a", "start": "07:00", "end": "08:00", "state": "x"},
+                {"name": "b", "start": "08:00", "end": "09:00", "state": "y"},
+            ],
+            "boundary_state": {},
+        },
+        retention_days=30,
+        today=NOW.date(),
+    )
+
+    result = asyncio.run(service.generate_for_session(SESSION, now=NOW))
+    assert result.success
+    assert len(context.plan_calls) == 2  # 第一次命中结构重复 → 定向重生成
+    snapshot = store.get(persona_hash, NOW.date(), "UTC")
+    assert snapshot["ai_slots"][0]["name"] == "外出"

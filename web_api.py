@@ -412,6 +412,10 @@ class TimeAwarenessWebApi:
                 return _err("服务器保存失败，请重试", 500)
             except ValueError as exc:
                 return _err(str(exc) or "校验失败")
+            logger.info(
+                f"{tag()} 🖊️ WebUI 保存人格日程: persona_hash={persona_hash[:8]}… "
+                f"date={date_text} user_slots={len(slots)} snapshot_id={snapshot_id}"
+            )
             return _ok(**result)
         except Exception as exc:
             return _internal_error(exc)
@@ -454,6 +458,10 @@ class TimeAwarenessWebApi:
                 return _err("服务器删除失败，请重试", 500)
             except ValueError as exc:
                 return _err(str(exc) or "校验失败")
+            logger.info(
+                f"{tag()} 🗑️ WebUI 删除用户时段: persona_hash={persona_hash[:8]}… "
+                f"date={date_text} user_slot_id={user_slot_id}"
+            )
             return _ok(**result)
         except Exception as exc:
             return _internal_error(exc)
@@ -493,6 +501,9 @@ class TimeAwarenessWebApi:
                 return _err("静态日程配置保存失败，请重试", 500)
             except (TypeError, ValueError) as exc:
                 return _err(str(exc) or "校验失败")
+            logger.info(
+                f"{tag()} 🧱 WebUI 保存静态日程: slots={len(slots)} revision={revision}"
+            )
             return _ok(**result)
         except Exception as exc:
             return _internal_error(exc)
@@ -535,6 +546,29 @@ class TimeAwarenessWebApi:
         except Exception as exc:
             return _internal_error(exc)
 
+    async def weather_test(self):
+        """查看今日随机天气：返回结构化基调（白天/黑夜 + 温度区间）或未启用错误。"""
+        sensor = getattr(self.plugin, "weather_sensor", None)
+        if sensor is None or not sensor.enabled():
+            return _err("随机天气未启用：请在主配置页开启 daily_schedule.ai_daily.random_weather_enabled")
+        try:
+            ok, message = await sensor.validate()
+        except Exception as exc:
+            return _err(f"查询失败: {type(exc).__name__}: {exc}")
+        if not ok:
+            return _err(message)
+        current = await sensor.current_weather()
+        return _ok(
+            ok=True,
+            message=message,
+            weather={
+                "text_day": str(current.get("text_day", "") or ""),
+                "text_night": str(current.get("text_night", "") or ""),
+                "temp_min": current.get("temp_min"),
+                "temp_max": current.get("temp_max"),
+            },
+        )
+
     def register(self) -> None:
         endpoints = (
             ("about", self.get_about, ["GET"], "获取插件版本信息"),
@@ -551,6 +585,7 @@ class TimeAwarenessWebApi:
             ("tasks/create", self.create_task, ["POST"], "新增手动提醒任务"),
             ("tasks/cancel", self.cancel_task, ["POST"], "取消任务"),
             ("config/schema", self.get_config_schema, ["GET"], "获取配置（只读）"),
+            ("weather/test", self.weather_test, ["GET"], "查看今日随机天气"),
         )
         for path, handler, methods, description in endpoints:
             self.context.register_web_api(

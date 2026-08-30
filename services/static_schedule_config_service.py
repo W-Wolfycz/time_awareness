@@ -115,7 +115,7 @@ class StaticScheduleConfigService:
 
             if self._check_overlap is not None:
                 self._check_overlap()
-            logger.info(f"{tag()} ✍️ 静态日程已从 Plugin Page 保存: slots={len(normalized)}")
+            logger.debug(f"{tag()} ✍️ 静态日程已从 Plugin Page 保存: slots={len(normalized)}")
             return {
                 "revision": static_schedule_revision(normalized),
                 "slots": normalized,

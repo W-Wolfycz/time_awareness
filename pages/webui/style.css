@@ -445,7 +445,7 @@ table.data-table {
   margin-top: 4px;
 }
 
-/* ==================== Dashboard Hero（时间感知面板） ==================== */
+/* ==================== Dashboard Hero（时笺面板） ==================== */
 .dashboard-hero {
   margin-bottom: 20px;
   text-align: center;
@@ -1300,3 +1300,21 @@ select.form-input {
   color: var(--text-muted);
   margin-bottom: 6px;
 }
+
+
+/* ==================== 天气连接测试 ==================== */
+.weather-test-card { margin: 0 0 20px; padding: 18px; }
+.weather-test-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.weather-test-label { font-size: 14px; font-weight: 600; }
+.weather-test-result { margin-top: 8px; font-size: 13px; color: #8a8a8a; min-height: 1em; word-break: break-all; }
+.weather-cells { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.weather-cell-icon { font-size: 18px; line-height: 1; }
+.weather-cell-text { font-size: 14px; font-weight: 600; }
+.weather-cell-arrow { color: var(--text-muted); }
+.weather-cell-temp {
+  margin-left: 8px; padding-left: 12px;
+  border-left: 1px solid var(--border);
+  font-family: var(--mono); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.weather-test-result.weather-test-ok { color: #3cb371; }
+.weather-test-result.weather-test-err { color: #e05f5f; }

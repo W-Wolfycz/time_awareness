@@ -73,8 +73,12 @@ class TimeContextService:
         *,
         now=None,
         include_last_chat: bool = True,
+        weather_text: str | None = None,
     ) -> str:
-        """把同一 ``now`` 快照渲染成本轮动态 XML 标签。"""
+        """把同一 ``now`` 快照渲染成本轮动态 XML 标签。
+
+        ``weather_text`` 由调用方（main.py hook）异步取实时天气后传入；为空则省略。
+        """
         facts = self.facts.collect(
             scope="conversation",
             session=session,
@@ -85,6 +89,8 @@ class TimeContextService:
         if self.time_guidance_enabled():
             parts.append(self.build_datetime_reminder(now=facts.now))
         parts.append(f"<SCHEDULE_STATE>{facts.schedule.state}</SCHEDULE_STATE>")
+        if weather_text:
+            parts.append(f"<WEATHER>今日天气基调：{weather_text}</WEATHER>")
         if facts.workday.available:
             parts.append(f"<WORKDAY_STATE>{facts.workday.value}</WORKDAY_STATE>")
         if facts.lunar.available:

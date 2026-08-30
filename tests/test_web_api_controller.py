@@ -30,7 +30,7 @@ def test_web_api_registration_uses_controller_bound_methods(monkeypatch):
     context = Context()
     controller = module.register_web_apis(context, plugin)
 
-    assert len(context.routes) == 14
+    assert len(context.routes) == 15
     assert all(route[1].__self__ is controller for route in context.routes)
     assert {route[0] for route in context.routes} == {
         "/time_awareness/about",
@@ -47,6 +47,7 @@ def test_web_api_registration_uses_controller_bound_methods(monkeypatch):
         "/time_awareness/schedules/delete",
         "/time_awareness/static-schedules",
         "/time_awareness/static-schedules/save",
+        "/time_awareness/weather/test",
     }
 
 

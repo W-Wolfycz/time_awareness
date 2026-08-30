@@ -21,6 +21,7 @@ from typing import Any, Awaitable, Callable
 from ..domain.schedule import schedule_similarity
 from ..integrations.persona_resolver import extract_persona_prompt, resolve_effective_persona
 from ..constants import DEFAULT_DAILY_SCHEDULE_SYSTEM_PROMPT
+from ..log import logger, tag
 from ..llm.daily_schedule_generator import (
     PlanningResult,
     ScheduleValidationError,
@@ -42,7 +43,7 @@ from .adaptive_policy import (
 )
 
 
-PROMPT_REVISION = "daily_schedule_v2"
+PROMPT_REVISION = "daily_schedule_v6"
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 # AI 日程所有“重试语义”LLM 循环的统一退避序列（秒）：第 1 次尝试不等待，
@@ -81,6 +82,7 @@ class DailyScheduleGenerationError(RuntimeError):
         *,
         retryable: bool,
         calls_executed: int = 0,
+        detail: str = "",
     ):
         super().__init__(message)
         self.error_type = error_type
@@ -88,6 +90,16 @@ class DailyScheduleGenerationError(RuntimeError):
         self.retryable = retryable
         # 本次 attempt 内已实际发起的逻辑 LLM 调用数，仅用于诊断日志。
         self.calls_executed = int(calls_executed or 0)
+        # 底层异常全文（单行化，不截断），用于失败日志与失败记录。
+        self.detail = str(detail or "").strip()
+
+
+def exception_detail(exc: BaseException) -> str:
+    """把异常压成单行可诊断文本：保留全文，仅折叠换行/连续空白。"""
+    text = str(exc).strip()
+    if not text:
+        text = type(exc).__name__
+    return " ".join(text.split())
 
 
 class DailyScheduleGeneration:
@@ -129,6 +141,63 @@ class DailyScheduleGeneration:
         """返回 AI 日程生成输入配置（扁平字段优先、旧分组回退）。"""
         return resolve_ai_generation_config(self.config)
 
+    def _ai_daily_config(self) -> dict:
+        """返回 ``daily_schedule.ai_daily`` 原始配置（无旧分组语义的新键）。"""
+        daily = self.config.get("daily_schedule", {}) if isinstance(self.config, dict) else {}
+        if not isinstance(daily, dict):
+            return {}
+        ai_daily = daily.get("ai_daily", {})
+        return ai_daily if isinstance(ai_daily, dict) else {}
+
+    def _adaptive_config(self) -> dict:
+        """返回 ``daily_schedule.ai_daily.adaptive`` 原始配置（池归属自适应分组）。"""
+        adaptive = self._ai_daily_config().get("adaptive", {})
+        return adaptive if isinstance(adaptive, dict) else {}
+
+    def _pool_items(self, key: str) -> list[str]:
+        """读取创意池 list 配置：逐条 trim、去重、上限 50。"""
+        value = self._adaptive_config().get(key)
+        if not isinstance(value, list):
+            return []
+        items: list[str] = []
+        for entry in value:
+            item = str(entry or "").strip()
+            if item and item not in items:
+                items.append(item)
+        return items[:50]
+
+    def _theme_pool(self) -> list[str]:
+        return self._pool_items("theme_pool")
+
+    def _style_pool(self) -> list[str]:
+        return self._pool_items("style_pool")
+
+    def _allow_custom_theme(self) -> bool:
+        value = self._adaptive_config().get("allow_custom_theme", True)
+        return value if isinstance(value, bool) else True
+
+    @staticmethod
+    def _recent_themes(enhanced: EnhancedContext) -> list[dict]:
+        """从反重复已抓取的最近快照中提取各天 theme/style（窗口随 recent_days）。"""
+        themes: list[dict] = []
+        for snapshot in enhanced.recent_snapshots or ():
+            if not isinstance(snapshot, dict):
+                continue
+            boundary = snapshot.get("boundary_state")
+            if not isinstance(boundary, dict):
+                continue
+            theme = str(boundary.get("daily_theme", "") or "").strip()
+            style = str(boundary.get("daily_style", "") or "").strip()
+            if theme or style:
+                themes.append(
+                    {
+                        "date": str(snapshot.get("local_date", "") or ""),
+                        "daily_theme": theme,
+                        "daily_style": style,
+                    }
+                )
+        return themes
+
     async def generate(
         self,
         *,
@@ -136,17 +205,25 @@ class DailyScheduleGeneration:
         now,
         enhanced: EnhancedContext | None = None,
         persona: Any | None = None,
+        forecast: dict | None = None,
     ) -> GeneratedDailySchedule:
         """生成当天日程。
 
         ``persona`` 由 service 层在解析身份时同一次解析得到并传入，保证
         快照归属与注入内容同源；未传入时（独立使用/测试）内部回退自行解析。
+        ``forecast`` 为目标日的天气基调预报（如存在），注入 Step2 供
+        天气自适应排日程（保持弹性表述，见提示词条款）。
         """
         policy = await self.policy()
         enhanced = enhanced or EnhancedContext()
         provider_id = await self._resolve_provider_id(session)
         persona_prompt = await self._resolve_persona_prompt(session, persona)
         sensors = self.time_context.build_generation_sensor_snapshot(now=now)
+        logger.debug(
+            f"{tag()} AI 日程生成开始: provider={provider_id} "
+            f"adaptive={policy.enabled} continuity={policy.state_continuity_enabled} "
+            f"candidates={policy.effective_candidate_count}"
+        )
         # Step1：角色状态评估（当日初始 boundary），失败降级不阻塞排日程
         calls_executed = 0
         skipped: list[str] = []
@@ -165,6 +242,17 @@ class DailyScheduleGeneration:
             calls_executed += boundary_calls
             skipped.extend(boundary_skipped)
             enhanced = dc_replace(enhanced, today_boundary=today_boundary)
+            if today_boundary:
+                logger.debug(
+                    f"{tag()} Step1 角色状态评估完成: "
+                    f"theme={today_boundary.get('daily_theme', '-') or '-'} "
+                    f"skipped={','.join(boundary_skipped) or '-'}"
+                )
+            else:
+                logger.debug(
+                    f"{tag()} Step1 角色状态评估未产出（以空状态继续）: "
+                    f"skipped={','.join(boundary_skipped) or '-'}"
+                )
         elif not policy.state_continuity_enabled:
             # 连续性关闭：防御性压制调用方/测试注入的边界数据，确保
             # Step2 prompt、judge 与评分路径都不会拿到边界语义。
@@ -188,6 +276,7 @@ class DailyScheduleGeneration:
             sensors=sensors,
             now=now,
             enhanced=enhanced,
+            forecast=forecast,
         )
         calls_executed += executed
         skipped.extend(extra_skipped)
@@ -213,6 +302,7 @@ class DailyScheduleGeneration:
         sensors: dict,
         now,
         enhanced: EnhancedContext,
+        forecast: dict | None = None,
     ) -> tuple[PlanningResult, int, list[str], str | None]:
         """Step2：单候选或多候选规划（含反重复定向重生成），返回 (result, executed, skipped, anti_repeat)。"""
         if not policy.enabled or not policy.wants_candidates:
@@ -224,6 +314,7 @@ class DailyScheduleGeneration:
                 policy=policy,
                 enhanced=enhanced,
                 anti_repeat=None,
+                forecast=forecast,
             )
             anti_repeat = None
             if (
@@ -232,6 +323,7 @@ class DailyScheduleGeneration:
                 and enhanced.recent_snapshots
                 and self._is_repeat(result.slots, enhanced.recent_snapshots)
             ):
+                logger.debug(f"{tag()} 单候选与最近日程相似度过高，定向重生成")
                 anti_repeat = self._anti_repeat_instruction(enhanced)
                 try:
                     result, executed2, extra2 = await self._plan_once(
@@ -242,11 +334,15 @@ class DailyScheduleGeneration:
                         policy=policy,
                         enhanced=enhanced,
                         anti_repeat=anti_repeat,
+                        forecast=forecast,
                     )
-                except DailyScheduleGenerationError:
+                except DailyScheduleGenerationError as exc:
                     # 反重复重生成最终失败：保留原合法候选（计划 §4.3）
                     extra_skipped = extra_skipped + ["antirepeat:failed"]
                     anti_repeat = None
+                    logger.debug(
+                        f"{tag()} 反重复重生成失败，保留原合法候选: {exception_detail(exc)}"
+                    )
                 else:
                     executed += executed2
                     extra_skipped = extra_skipped + extra2
@@ -259,6 +355,7 @@ class DailyScheduleGeneration:
             now=now,
             policy=policy,
             enhanced=enhanced,
+            forecast=forecast,
         )
         anti_repeat = None
         if (
@@ -266,6 +363,7 @@ class DailyScheduleGeneration:
             and enhanced.recent_snapshots
             and self._is_repeat(result.slots, enhanced.recent_snapshots)
         ):
+            logger.debug(f"{tag()} 多候选结果与最近日程相似度过高，定向重生成")
             anti_repeat = self._anti_repeat_instruction(enhanced)
             try:
                 result, executed2, extra2 = await self._plan_once(
@@ -276,11 +374,15 @@ class DailyScheduleGeneration:
                     policy=policy,
                     enhanced=enhanced,
                     anti_repeat=anti_repeat,
+                    forecast=forecast,
                 )
-            except DailyScheduleGenerationError:
+            except DailyScheduleGenerationError as exc:
                 # 反重复重生成最终失败：保留原合法候选（计划 §4.3）
                 extra_skipped = extra_skipped + ["antirepeat:failed"]
                 anti_repeat = None
+                logger.debug(
+                    f"{tag()} 反重复重生成失败，保留原合法候选: {exception_detail(exc)}"
+                )
             else:
                 executed += executed2
                 extra_skipped = extra_skipped + extra2
@@ -298,6 +400,7 @@ class DailyScheduleGeneration:
         policy: AdaptiveGenerationPolicy,
         enhanced: EnhancedContext,
         anti_repeat: str | None,
+        forecast: dict | None = None,
     ) -> tuple[PlanningResult, int, list[str]]:
         prompt = self._build_prompt(
             now=now,
@@ -306,6 +409,7 @@ class DailyScheduleGeneration:
             policy=policy,
             enhanced=enhanced,
             anti_repeat=anti_repeat,
+            forecast=forecast,
         )
         calls = 0
         for attempt in range(policy.max_attempts):
@@ -329,16 +433,37 @@ class DailyScheduleGeneration:
                     kind = "invalid_output" if isinstance(exc, ScheduleValidationError) else "llm_error"
                     message = "模型输出未通过日程协议校验" if kind == "invalid_output" else "调用日程生成模型失败"
                     raise DailyScheduleGenerationError(kind, message, retryable=True,
-                                                       calls_executed=calls) from exc
+                                                       calls_executed=calls,
+                                                       detail=exception_detail(exc)) from exc
+                logger.debug(
+                    f"{tag()} AI 日程规划第 {attempt + 1}/{policy.max_attempts} 次尝试失败: "
+                    f"{exception_detail(exc)}"
+                )
             finally:
                 await self._gate.release()
         raise AssertionError("unreachable")
 
     def _is_repeat(self, slots: list[dict], recent_snapshots: tuple[dict, ...]) -> bool:
+        signature = self._structure_signature(slots)
         for snapshot in recent_snapshots:
+            # 结构级反重复：段落的 (start,end) 序列与最近某天的 AI 原始输出
+            # 完全相同即判重复（治「三餐+午休骨架复读」）；空日程不参与。
+            if signature and self._structure_signature(
+                snapshot.get("ai_slots") or snapshot.get("slots") or []
+            ) == signature:
+                return True
             if schedule_similarity(slots, snapshot.get("slots") or []) >= SIMILARITY_REPEAT_THRESHOLD:
                 return True
         return False
+
+    @staticmethod
+    def _structure_signature(slots: list[dict]) -> tuple[tuple[str, str], ...]:
+        """段落的 (start, end) 序列签名，用于结构级反重复。"""
+        return tuple(
+            (str(slot.get("start", "")), str(slot.get("end", "")))
+            for slot in slots
+            if isinstance(slot, dict)
+        )
 
     @staticmethod
     def _anti_repeat_instruction(enhanced: EnhancedContext) -> str:
@@ -359,6 +484,7 @@ class DailyScheduleGeneration:
         now,
         policy: AdaptiveGenerationPolicy,
         enhanced: EnhancedContext,
+        forecast: dict | None = None,
     ) -> tuple[PlanningResult, int, list[str]]:
         count = policy.effective_candidate_count
         judge = policy.effective_judge
@@ -373,6 +499,7 @@ class DailyScheduleGeneration:
                 policy=policy,
                 enhanced=enhanced,
                 anti_repeat=None,
+                forecast=forecast,
             )
             return result, executed, skipped
 
@@ -383,10 +510,11 @@ class DailyScheduleGeneration:
             policy=policy,
             enhanced=enhanced,
             anti_repeat=None,
+            forecast=forecast,
         )
 
-        async def _one(index: int) -> tuple[dict | None, int]:
-            """返回 (候选或 None, 是否实际发起了 LLM 调用)。
+        async def _one(index: int) -> tuple[dict | None, int, str]:
+            """返回 (候选或 None, 实际发起的 LLM 调用数, 首个失败详情)。
 
             并发槽超时不发起调用（attempted=False）；发起但失败仍计入调用。
             候选只携带 ``slots``，不携带角色状态——Step1 当日边界是所有
@@ -395,6 +523,7 @@ class DailyScheduleGeneration:
             或前一日 boundary_state）匹配，见 ``deterministic_score``。
             """
             calls = 0
+            first_error = ""
             for attempt in range(policy.max_attempts):
                 if attempt > 0:
                     await self._sleep(_retry_delay_seconds(attempt))
@@ -406,16 +535,24 @@ class DailyScheduleGeneration:
                     result, _ = await generate_daily_schedule(
                         self.context, provider_id=provider_id, prompt=base_prompt,
                         max_slots=self.max_slots())
-                    return {"index": index, "slots": result.slots}, calls
-                except Exception:
-                    pass
+                    return {"index": index, "slots": result.slots}, calls, ""
+                except Exception as exc:
+                    if not first_error:
+                        first_error = exception_detail(exc)
+                    logger.debug(
+                        f"{tag()} 候选 {index + 1} 第 {attempt + 1}/{policy.max_attempts} 次尝试失败: "
+                        f"{exception_detail(exc)}"
+                    )
                 finally:
                     await self._gate.release()
-            return None, calls
+            return None, calls, first_error
 
         attempts = await asyncio.gather(*(_one(index) for index in range(count)))
-        valid = [candidate for candidate, _ in attempts if candidate is not None]
-        executed = sum(calls for _, calls in attempts)
+        valid = [candidate for candidate, _, _ in attempts if candidate is not None]
+        executed = sum(calls for _, calls, _ in attempts)
+        logger.debug(
+            f"{tag()} 多候选规划: 合法 {len(valid)}/{count} 份，实际调用 {executed} 次"
+        )
         if len(valid) < count:
             skipped.append(f"candidates:partial_failure({count - len(valid)}/{count})")
         if not valid:
@@ -424,6 +561,7 @@ class DailyScheduleGeneration:
                 "所有候选日程生成失败",
                 retryable=True,
                 calls_executed=executed,
+                detail=next((err for _, _, err in attempts if err), ""),
             )
 
         chosen: dict
@@ -841,7 +979,11 @@ class DailyScheduleGeneration:
                         calls,
                         [] if attempt == 0 else ["boundary:retried"],
                     )
-                except Exception:
+                except Exception as exc:
+                    logger.debug(
+                        f"{tag()} Step1 角色状态评估第 {attempt + 1}/{policy.max_attempts} 次尝试失败: "
+                        f"{exception_detail(exc)}"
+                    )
                     continue
             finally:
                 await self._gate.release()
@@ -865,7 +1007,7 @@ class DailyScheduleGeneration:
         filled = dict(boundary)
         for key in (
             "energy", "sleep_debt", "focus", "social_energy", "motivation",
-            "physical_state", "daily_theme", "unfinished_plans",
+            "physical_state", "daily_theme", "daily_style", "unfinished_plans",
         ):
             if key not in filled:
                 filled[key] = previous.get(key) if previous else None
@@ -924,6 +1066,56 @@ class DailyScheduleGeneration:
             blocks.append(self._json_block("PREVIOUS_BOUNDARY", previous_boundary))
         if actual_schedules:
             blocks.append(self._json_block("ACTUAL_SCHEDULES", actual_schedules))
+        theme_pool = self._theme_pool()
+        if theme_pool:
+            allow_custom = self._allow_custom_theme()
+            blocks.append(
+                self._json_block(
+                    "THEME_POOL",
+                    {
+                        "pool": theme_pool,
+                        "allow_custom": allow_custom,
+                        "instruction": (
+                            "必须优先从 pool 中挑选一个最贴合当日状态的类型作为 daily_theme；"
+                            "仅当池中没有任何类型贴合时才可自创 2–12 字的具体类型标签，"
+                            "禁止使用「常规日」「日常」等空泛标签。"
+                            if allow_custom
+                            else "必须严格从 pool 中挑选一个类型作为 daily_theme，不得自创。"
+                        ),
+                    },
+                )
+            )
+        style_pool = self._style_pool()
+        if style_pool:
+            allow_custom = self._allow_custom_theme()
+            blocks.append(
+                self._json_block(
+                    "STYLE_POOL",
+                    {
+                        "pool": style_pool,
+                        "allow_custom": allow_custom,
+                        "instruction": (
+                            "必须优先从 pool 中挑选一个最贴合当日基调的状态色彩作为 daily_style；"
+                            "仅当池中没有任何色彩贴合时才可自创 ≤12 字的风格词。"
+                            if allow_custom
+                            else "必须严格从 pool 中挑选一个状态色彩作为 daily_style，不得自创。"
+                        ),
+                    },
+                )
+            )
+        recent_themes = self._recent_themes(enhanced)
+        if recent_themes:
+            blocks.append(
+                self._json_block(
+                    "RECENT_THEMES",
+                    {
+                        "instruction": "以下最近 N 天实际使用过的主题与状态色彩仅作反重复参考："
+                        "当日 daily_theme 与 daily_style 不得与其中任何一天完全相同；"
+                        "状态确实相似时，换一个相近但不同的类型/风格。",
+                        "items": recent_themes,
+                    },
+                )
+            )
         return "\n\n".join(blocks)
 
     def _build_prompt(
@@ -935,6 +1127,7 @@ class DailyScheduleGeneration:
         policy: AdaptiveGenerationPolicy,
         enhanced: EnhancedContext,
         anti_repeat: str | None,
+        forecast: dict | None = None,
     ) -> str:
         daily_schedule = self.config.get("daily_schedule", {})
         if not isinstance(daily_schedule, dict):
@@ -988,6 +1181,23 @@ class DailyScheduleGeneration:
         if enhanced.recent_schedules_text:
             blocks.append(
                 self._json_block("RECENT_SCHEDULES", {"content": enhanced.recent_schedules_text})
+            )
+        if forecast:
+            blocks.append(
+                self._json_block(
+                    "WEATHER_FORECAST",
+                    {
+                        "instruction": "目标日的天气基调（白天/夜间各一段），由系统规定、"
+                        "不存在现实冲突：可把基调落实到具体时段——如白天「小雨」可只安排"
+                        "其中 1–2 个时段下雨、其余多云或阴；雨天安排室内、高温避开正午"
+                        "外出；state 与天气保持一致，不得脱离基调自创其他天气。",
+                        "date": self._safe_reference(forecast.get("fxDate", ""), limit=10),
+                        "text_day": self._safe_reference(forecast.get("textDay", ""), limit=40),
+                        "text_night": self._safe_reference(forecast.get("textNight", ""), limit=40),
+                        "temp_max": self._safe_reference(forecast.get("tempMax", ""), limit=10),
+                        "temp_min": self._safe_reference(forecast.get("tempMin", ""), limit=10),
+                    },
+                )
             )
         if static_slots:
             # 静态日程在两种优先级下都注入，让规划模型知道其存在；

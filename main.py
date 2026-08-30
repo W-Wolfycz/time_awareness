@@ -1,5 +1,5 @@
 """
-time_awareness — 时间感知增强
+time_awareness — 时笺
 
 为 LLM 注入：
 1. 静态时间规则 → system_prompt 末尾（保 Prompt 缓存前缀稳定）
@@ -36,6 +36,7 @@ from .core.calendar_store import CalendarStore
 from .core.daily_schedule_store import DailyScheduleSnapshotStore
 from .core.last_chat_tracker import LastChatTracker
 from .core.scheduler import DueGroup, ReminderScheduler, TriggerResult
+from .core.weather_sensor import WeatherSensor
 from .domain.schedule import (
     ScheduleValidationError,
     detect_static_overlaps,
@@ -72,7 +73,7 @@ _AI_GENERATION_DEFAULTS = {
 
 
 class TimeAwarenessPlugin(Star):
-    """时间感知 + 智能日历 + 主动提醒。"""
+    """时笺 + 智能日历 + 主动提醒。"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -80,10 +81,14 @@ class TimeAwarenessPlugin(Star):
         self._migrate_ai_generation_config()
 
         # 2.0.x：布尔开关形态 → 多选 selector 形态（一次性迁移，见 config_migration）
-        selector_migrated = migrate_time_sensors(self.config)
-        selector_migrated = migrate_builtin_categories(self.config) or selector_migrated
-        selector_migrated = migrate_log_group(self.config) or selector_migrated
-        if selector_migrated:
+        migrated_sensors = migrate_time_sensors(self.config)
+        migrated_builtin = migrate_builtin_categories(self.config)
+        migrated_log = migrate_log_group(self.config)
+        if migrated_sensors or migrated_builtin or migrated_log:
+            logger.info(
+                f"{tag()} 配置形态迁移完成: sensors={migrated_sensors} "
+                f"builtin={migrated_builtin} log_group={migrated_log}"
+            )
             self._try_save_config()
 
         # 日志前缀带 bot 实例标识：区分多 bot 共存场景（顶层全局配置项；
@@ -118,6 +123,12 @@ class TimeAwarenessPlugin(Star):
         self.calendar_manager = CalendarManager(self.data_dir, store=self.calendar_store)
         self.builtin_manager = BuiltinManager(self.data_dir)
         self.last_chat_tracker = LastChatTracker(self.data_dir)
+        self.weather_sensor = WeatherSensor(
+            config=self.config,
+            # 以插件时区为准取「今天」：与日程 local_date、<SYSTEM_REMINDER> 同源，
+            # 避免 VPS 系统时区与插件配置时区不一致时天气种子日期差一天。
+            now_provider=lambda: get_now(self.config, self._astrbot_config()),
+        )
         self.time_context = TimeContextService(
             config=self.config,
             astrbot_config_provider=self._astrbot_config,
@@ -135,6 +146,7 @@ class TimeAwarenessPlugin(Star):
             store=self.daily_schedule_store,
             time_context=self.time_context,
             concurrency_gate=self.llm_gate,
+            weather_forecast_provider=self.weather_sensor.daily_forecast,
         )
         self.time_context.set_daily_schedule_service(self.daily_schedule_service)
         # 人格日程人工编辑服务（WebUI 查询/编辑快照，与生成服务共用锁）
@@ -253,7 +265,21 @@ class TimeAwarenessPlugin(Star):
             await self._shutdown_resources()
             raise
 
+        if self.weather_sensor.enabled():
+            asyncio.create_task(self._announce_random_weather())
         logger.info(f"{tag()} ✅ 初始化完成")
+
+    async def _announce_random_weather(self) -> None:
+        """启动播报：随机天气无网络、即时可得，直接输出今日基调。"""
+        try:
+            ok, message = await self.weather_sensor.validate()
+        except Exception as e:
+            logger.debug(f"{tag()} 随机天气获取异常: {e}")
+            return
+        if ok:
+            logger.info(f"{tag()} 🌦️ 今日随机天气：{message}")
+        else:
+            logger.debug(f"{tag()} 随机天气未启用")
 
     async def _shutdown_resources(self) -> None:
         """按已启动资源逆序停止后台资源；幂等，供 initialize 回滚与 terminate 共用。
@@ -549,9 +575,18 @@ class TimeAwarenessPlugin(Star):
                     logger.warning(f"{tag(event)} ⚠️ record_user 失败: {e}")
             # 动态注入单独隔离：任一传感器异常不应让整个动态上下文消失
             try:
+                weather_text = None
+                if self.weather_sensor.enabled():
+                    try:
+                        current = await self.weather_sensor.current_weather()
+                        if current:
+                            weather_text = self.weather_sensor.render_current(current)
+                    except Exception as e:
+                        logger.debug(f"{tag(event)} 天气实况查询失败: {e}")
                 dyn = self.time_context.build_dynamic(
                     session=umo,
                     include_last_chat=not is_chat_memory_takeover_applied(event),
+                    weather_text=weather_text,
                 )
                 req.extra_user_content_parts.append(TextPart(text=dyn).mark_as_temp())
             except Exception as e:

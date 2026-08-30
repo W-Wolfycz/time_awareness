@@ -1,4 +1,4 @@
-# time_awareness — 时间感知增强
+# 时笺 — TimeAwareness
 
 为 LLM 提供现实时间、角色时段状态、工作日/农历/黄历、日历事项、上次对话间隔和主动提醒能力。
 
@@ -9,7 +9,7 @@
 - 时间传感器：工作日、农历、黄历、现实日历事件、上次对话间隔。
 - AI 日历：按世界观生成全年节日、纪念日和季节事项。
 - 主动提醒：在白名单会话发送日历提醒、问候和后续任务。
-- Plugin Page：概览、日历、任务、静态日程管理，以及「人格日程」查看 + 用户覆盖层编辑；其他低频配置仍使用 AstrBot 主配置页。
+- Plugin Page：概览（含「查看今日随机天气」）、日历、任务、静态日程管理，以及「人格日程」查看 + 用户覆盖层编辑；其他低频配置仍使用 AstrBot 主配置页。
 
 ## 安装
 
@@ -53,7 +53,12 @@ AstrBot 主配置页采用渐进显示：日程、AI 日程、自适应增强、
 | `ai_daily.adaptive.context_token_budget` | 增强上下文 Token 上限；`0` 自动按 Provider 上下文窗口的 80% 分配 | `0` |
 | `ai_daily.adaptive.max_concurrent_llm` | 插件 LLM 并发上限的旧位置；仅在 `runtime.llm_max_concurrency=0` 时回退使用 | `1` |
 | `ai_daily.adaptive.acquire_timeout_seconds` | 并发等待超时（0–120） | `10` |
+| `ai_daily.adaptive.theme_pool` | 每日主题类型池；Step1 从中挑选当日主题，清空=自由标签 | 内置 12 种 |
+| `ai_daily.adaptive.style_pool` | 每日状态色彩池；Step1 从中挑选措辞风格，清空=关闭该维度 | 内置 10 种 |
+| `ai_daily.adaptive.allow_custom_theme` | 池内无合适项时允许自创主题/风格（禁「常规日」类空泛词）；关闭=严格池内 | `true` |
 | `ai_daily.ai_priority_over_static` | AI 优先于静态日程（关闭时静态优先）；不受 `adaptive.enabled` 控制 | `false` |
+| `ai_daily.random_weather_enabled` | 启用随机天气：每天随机当日天气基调（白天/黑夜各一段），对话注入、日程生成参考 | `false` |
+| `ai_daily.weather_pool` | 天气权重池（每行「天气,权重」）；留空=内置默认 | 内置 7 种 |
 
 时段采用左闭右开规则：开始时刻计入，结束时刻不计入；`24:00` 只允许作为当日不可命中的右边界。相邻时段请首尾衔接（如 `07:00–07:30` 与 `07:30–08:00`）；结束时间早于开始时间表示跨午夜，写入快照时拆成两个非跨日片段。
 
@@ -61,9 +66,9 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 
 **分层来源与冻结**（2.0.0）：快照持久化「已执行时间线 + 用户层 + AI 层 + 静态层」四层，读取时动态合并。已执行区间在每次修改操作时按服务端实际接收时刻冻结（非整分钟向上取整到下一整分钟），冻结后不可被任何来源改写或回填；用户层高于 AI 与静态日程，AI 与静态的优先级由 `ai_daily.ai_priority_over_static` 决定；用户时段互不重叠，删除未来用户时段后底层自动恢复。WebUI 中 AI 与静态日程卡片始终只读，用户通过新增/修改覆盖层影响未来时间线；`/schedule regenerate` 保留已执行部分、清空未执行用户层并替换未来 AI 日程。
 
-**自适应增强**（`daily_schedule.ai_daily.adaptive`，默认全关）：让日程在保持角色稳定习惯的同时产生有因果的日变化。`recent_days=0` 关闭最近日程参考，`1–30` 决定参考与反重复范围（同时决定连续性回溯窗口）；角色状态连续性由评估回溯窗口内（缺省 7 天）最近一次可用状态，并携带自该边界日起的实际日程（含用户修改与静态兜底）推导今日初始状态；断链超窗视为全新开始，由评估依据人设与传感器推导初始状态；`daily_theme` 随角色状态一并输出。`candidate_count=N` 独立生成 N 份方案；`candidate_selection=heuristic` 本地评分，`llm` 额外调用一次模型评选并失败回退本地评分。`context_token_budget=0` 时以 Provider 上下文窗口 80% 为总输入目标，扣除固定 Prompt、Persona、世界观、传感器和静态日程后使用剩余额度；取不到上限时回退 8000 Token。重试按单步独立进行：状态评估、方案生成、重复检测与评选各自最多尝试 `max_attempts` 次，评估失败以空状态继续、评选失败回退本地评分、反重复失败保留原候选——不存在整工作流 × 单步骤的乘法重试。关闭自适应总开关时流程与基线一致（一次模型调用）。
+**自适应增强**（`daily_schedule.ai_daily.adaptive`，默认全关）：让日程在保持角色稳定习惯的同时产生有因果的日变化。`recent_days=0` 关闭最近日程参考，`1–30` 决定参考与反重复范围（同时决定连续性回溯窗口）：与最近日程结构相同的输出会触发定向重生成，最近用过的主题/风格会被要求避开。角色状态连续性由评估回溯窗口内（缺省 7 天）最近一次可用状态，并携带自该边界日起的实际日程（含用户修改与静态兜底）推导今日初始状态；断链超窗视为全新开始，由评估依据人设与传感器推导初始状态；`daily_theme`（主题类型）与 `daily_style`（措辞风格）由评估从 `theme_pool`/`style_pool` 中挑选并一并输出。`candidate_count=N` 独立生成 N 份方案；`candidate_selection=heuristic` 本地评分，`llm` 额外调用一次模型评选并失败回退本地评分。`context_token_budget=0` 时以 Provider 上下文窗口 80% 为总输入目标，扣除固定 Prompt、Persona、世界观、传感器和静态日程后使用剩余额度；取不到上限时回退 8000 Token。重试按单步独立进行：状态评估、方案生成、重复检测与评选各自最多尝试 `max_attempts` 次，评估失败以空状态继续、评选失败回退本地评分、反重复失败保留原候选——不存在整工作流 × 单步骤的乘法重试。关闭自适应总开关时流程与基线一致（一次模型调用）。
 
-生成输入包括日期、长期世界观、当前 Persona，以及已启用的传感器。Persona prompt 每日完整传入，不截断、不额外调用模型预压缩；插件不读取会话原始历史，避免跨会话传播。
+生成输入包括日期、长期世界观、当前 Persona、已启用的传感器，以及启用随机天气时的当日两段天气基调预报（`<WEATHER_FORECAST>`）。Persona prompt 每日完整传入，不截断、不额外调用模型预压缩；插件不读取会话原始历史，避免跨会话传播。
 
 ### `calendar`
 
@@ -90,7 +95,7 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 | `use_chat_memory_history` | 使用 ChatMemory 接管上下文 | `false` |
 | `reminder_provider_id` | 主动提醒模型，留空跟随当前会话 | `""` |
 
-主动提醒通过 `Context.llm_generate()` 独立调用，不经过 AstrBot 的 `on_llm_request`；启用时间感知后，插件会自行追加完整动态上下文。
+主动提醒通过 `Context.llm_generate()` 独立调用，不经过 AstrBot 的 `on_llm_request`；启用时笺后，插件会自行追加完整动态上下文。
 
 ### `runtime`
 
@@ -110,6 +115,7 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 ```xml
 <SYSTEM_REMINDER>当前日期时间：YYYY-MM-DD HH:MM（时区），星期X</SYSTEM_REMINDER>
 <SCHEDULE_STATE>当前命中的角色状态</SCHEDULE_STATE>
+<WEATHER>今日天气基调</WEATHER>
 <WORKDAY_STATE>工作日性质</WORKDAY_STATE>
 <LUNAR_STATE>农历日期</LUNAR_STATE>
 <ALMANAC_STATE>黄历信息</ALMANAC_STATE>
@@ -117,7 +123,7 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 <LAST_CHAT>上次对话间隔</LAST_CHAT>
 ```
 
-`<SCHEDULE_STATE>` 在日程未启用或未命中时为“无固定安排（按人设自然演绎）”；其他标签在没有数据或关闭对应传感器时省略。普通消息链使用临时 `extra_user_content_parts`，主动提醒链将同一内容追加到本轮 `prompt`。ChatMemory takeover contexts 已逐条携带 `<cm_time>`，所以它实际接管本轮请求时不会重复注入 `<LAST_CHAT>`；本地时间记录仍继续维护。
+`<SCHEDULE_STATE>` 在日程未启用或未命中时为“无固定安排（按人设自然演绎）”；`<WEATHER>` 仅在启用随机天气时出现；其他标签在没有数据或关闭对应传感器时省略。普通消息链使用临时 `extra_user_content_parts`，主动提醒链将同一内容追加到本轮 `prompt`。ChatMemory takeover contexts 已逐条携带 `<cm_time>`，所以它实际接管本轮请求时不会重复注入 `<LAST_CHAT>`；本地时间记录仍继续维护。
 
 ## 命令
 
@@ -160,7 +166,7 @@ if star_meta and star_meta.star_cls:
 
 | 目标 | 关键配置 |
 |---|---|
-| 只需要时间感知 | `time_guidance_enabled=true`，日程/日历/提醒保持关闭 |
+| 只需要时笺 | `time_guidance_enabled=true`，日程/日历/提醒保持关闭 |
 | 静态角色作息 | `enable_schedule=true`、`ai_daily.enabled=false`、填写 `schedule_templates`（无每日 LLM 调用） |
 | 基础 AI 每日日程 | `enable_schedule` 与 `ai_daily.enabled` 开启，`adaptive.enabled=false`（每 Persona/日期通常一次调用） |
 | 低成本动态化 | `adaptive.enabled=true`、`recent_days=3`、`state_continuity_enabled=true`、`candidate_count=1`、`candidate_selection=heuristic` |

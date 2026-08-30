@@ -24,11 +24,11 @@
     }
   },
   "time_awareness": {
-    "description": "🕐 时间感知设置",
+    "description": "🕐 时笺设置",
     "type": "object",
     "items": {
       "time_guidance_enabled": {
-        "description": "✅ 启用时间感知增强（含现实时间）",
+        "description": "✅ 启用时笺（含现实时间）",
         "type": "bool",
         "default": true,
         "hint": "注入当前日期时间、时区、星期、时段与当日事项；动态内容仅当轮生效、不写入历史。建议关闭 AstrBot 自带现实时间感知避免重复"
@@ -430,6 +430,32 @@
             },
             "hint": "关=静态优先；开=AI 优先（用户层始终最高）"
           },
+          "random_weather_enabled": {
+            "description": "🎲 启用随机天气",
+            "type": "bool",
+            "default": false,
+            "condition": {
+              "enabled": true
+            },
+            "hint": "开启后每天随机当日天气基调（白天/黑夜各一段），对话注入、日程生成参考；天气由系统规定、预报=实况，默认池开箱即用，可在「天气池」自定义权重"
+          },
+          "weather_pool": {
+            "description": "🎲 天气池（天气,权重）",
+            "type": "list",
+            "default": [
+              "晴,30",
+              "多云,25",
+              "阴,15",
+              "小雨,10",
+              "雷阵雨,5",
+              "大风,4",
+              "雾,3"
+            ],
+            "condition": {
+              "random_weather_enabled": true
+            },
+            "hint": "每行一条「天气,权重」，权重越高出现概率越大（白天/黑夜各自独立抽取）；非法行自动跳过，留空=内置默认池"
+          },
           "ai_generation": {
             "description": "",
             "type": "object",
@@ -481,6 +507,57 @@
                   "enabled": true
                 },
                 "hint": "0=关闭；1–30=注入最近 N 天日程摘要并反重复"
+              },
+              "theme_pool": {
+                "description": "🎲 每日主题类型池",
+                "type": "list",
+                "default": [
+                  "演习日",
+                  "远征日",
+                  "港区休整日",
+                  "外出日",
+                  "宅家日",
+                  "社交日",
+                  "学习日",
+                  "购物日",
+                  "整理日",
+                  "休闲漫游日",
+                  "低能量恢复日",
+                  "特别纪念日"
+                ],
+                "condition": {
+                  "enabled": true
+                },
+                "hint": "Step1 从中挑选当日主题类型；清空=自由标签。需同时开启「角色状态连续性」才生效"
+              },
+              "style_pool": {
+                "description": "🎨 每日状态色彩池",
+                "type": "list",
+                "default": [
+                  "慵懒",
+                  "活力",
+                  "优雅",
+                  "俏皮",
+                  "温柔",
+                  "冷峻",
+                  "元气",
+                  "随性",
+                  "沉稳",
+                  "浪漫"
+                ],
+                "condition": {
+                  "enabled": true
+                },
+                "hint": "Step1 从中挑选当日状态色彩；清空=关闭该维度。需同时开启「角色状态连续性」才生效"
+              },
+              "allow_custom_theme": {
+                "description": "✍️ 允许自创主题/风格",
+                "type": "bool",
+                "default": true,
+                "condition": {
+                  "enabled": true
+                },
+                "hint": "开=池内优先、无合适项可自创（禁「常规日」类空泛词）；关=严格池内"
               },
               "state_continuity_enabled": {
                 "description": "🧩 角色状态连续性",

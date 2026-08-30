@@ -32,13 +32,13 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 # 日界状态白名单键（有限范围、去身份化）
 _BOUNDARY_STATE_NUMERIC_KEYS = {"energy", "sleep_debt", "focus", "social_energy", "motivation"}
-_BOUNDARY_STATE_STRING_KEYS = {"physical_state", "daily_theme"}
+_BOUNDARY_STATE_STRING_KEYS = {"physical_state", "daily_theme", "daily_style"}
 
 
 def empty_boundary() -> dict:
     """全维度 null 种子：边界评估失败/无历史时存储仍保持全维度（缺失 = null）。
 
-    保证快照 boundary_state 恒为 8 个维度齐全，任何消费方都不需要处理缺字段。
+    保证快照 boundary_state 恒为 9 个维度齐全，任何消费方都不需要处理缺字段。
     """
     return {
         "energy": None,
@@ -48,6 +48,7 @@ def empty_boundary() -> dict:
         "motivation": None,
         "physical_state": None,
         "daily_theme": None,
+        "daily_style": None,
         "unfinished_plans": None,
     }
 
@@ -64,6 +65,8 @@ _BOUNDARY_ALIASES = {
     "动力": "motivation", "干劲": "motivation",
     "身体状态": "physical_state", "身体状况": "physical_state",
     "主题": "daily_theme", "基调": "daily_theme", "今日主题": "daily_theme",
+    "风格": "daily_style", "状态色彩": "daily_style", "今日风格": "daily_style",
+    "气质": "daily_style",
 }
 
 
@@ -125,8 +128,8 @@ def _validate_theme(value: Any) -> dict:
 def _validate_boundary_state(value: Any) -> dict:
     """校验日界状态；缺失/空对象/全省略（稀疏输出）返回 {}。
 
-    固定 8 维度：energy/sleep_debt/focus/social_energy/motivation（0-100）、
-    physical_state/daily_theme（短标签）、unfinished_plans（数组）。
+    固定 9 维度：energy/sleep_debt/focus/social_energy/motivation（0-100）、
+    physical_state/daily_theme/daily_style（短标签）、unfinished_plans（数组）。
     模型的中文/同义字段按别名映射归一化；情绪维度（mood/心情/情绪等）
     已交由好感插件管理，输出时给出明确提示拒绝。
     """
@@ -177,12 +180,20 @@ def _validate_boundary_state(value: Any) -> dict:
             field="boundary_state.daily_theme",
             max_length=20,
         )
-    if "unfinished_plans" in normalized and normalized["unfinished_plans"] not in (None, []):
+    if "daily_style" in normalized and normalized["daily_style"] not in (None, ""):
+        result["daily_style"] = _clean_text(
+            normalized["daily_style"],
+            field="boundary_state.daily_style",
+            max_length=12,
+        )
+    if "unfinished_plans" in normalized and normalized["unfinished_plans"] is not None:
         plans = normalized["unfinished_plans"]
-        if not isinstance(plans, list) or not plans:
+        if not isinstance(plans, list):
             raise ScheduleValidationError("unfinished_plans 必须是数组")
         if len(plans) > 8:
             raise ScheduleValidationError("unfinished_plans 超出 8 项上限")
+        # 空数组是「显式清空」（当日计划已全部完成）：保留为 []，
+        # 不得与「键缺失」混同——否则 _fill_boundary 会把昨日计划错误继承到次日。
         cleaned = []
         for index, plan in enumerate(plans):
             cleaned.append(
@@ -635,7 +646,7 @@ async def select_candidate_with_llm(
             else ""
         )
         if 0 <= choice < len(candidates):
-            logger.info(
+            logger.debug(
                 f"{tag()} 🤖 裁判选择候选 {choice}/{len(candidates)} 理由: {reason or '-'}"
             )
             return choice

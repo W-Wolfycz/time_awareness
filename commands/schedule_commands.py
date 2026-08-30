@@ -10,6 +10,7 @@ from ..domain.schedule import (
     find_active_static_slot,
     sort_static_slots,
 )
+from ..log import logger, tag
 
 
 class ScheduleCommands:
@@ -109,7 +110,11 @@ class ScheduleCommands:
             lines.append("今日 AI 快照尚未就绪；已自动回退静态日程。")
             failure = self.daily_schedule_service.get_failure_for_session(session, now=now)
             if failure:
-                lines.append(f"最近生成状态：{failure.get('error_type', 'unknown')}")
+                detail = str(failure.get("detail", "") or "").strip()
+                lines.append(
+                    f"最近生成状态：{failure.get('error_type', 'unknown')}"
+                    + (f" · {detail}" if detail else "")
+                )
         for slot in sort_static_slots(slots):
             name = str(slot.get("name", "") or "").strip()
             state = str(slot.get("state_prompt", "") or "").strip() or "(无状态描述)"
@@ -140,6 +145,7 @@ class ScheduleCommands:
 
     async def regenerate(self, session: str, *, event=None) -> AsyncIterator[str]:
         if not self.daily_schedule_service.enabled():
+            logger.debug(f"{tag()} /schedule regenerate 被拒：AI 每日日程未启用")
             yield (
                 "AI 每日日程尚未启用。请同时开启 daily_schedule.enable_schedule "
                 "和 daily_schedule.ai_daily.enabled。"
@@ -148,10 +154,14 @@ class ScheduleCommands:
         await self.daily_schedule_service.register_session_async(
             session, trigger=False, event=event
         )
+        logger.debug(f"{tag()} /schedule regenerate 开始: session={session}")
         yield "正在重新生成当前 Persona 的今日 AI 日程，请稍候……"
         result = await self.daily_schedule_service.generate_for_session(session, force=True)
         if result.success:
             source_label = "纯 AI" if result.source == "ai" else "AI + 静态日程"
+            logger.info(
+                f"{tag()} /schedule regenerate 完成: slots={result.slot_count} source={result.source}"
+            )
             yield (
                 f"✅ 今日 AI 日程已更新：{result.slot_count} 段，来源 {source_label}。\n"
                 "使用 /schedule show 查看当前结果。"
@@ -159,4 +169,7 @@ class ScheduleCommands:
             return
         old_snapshot = self.daily_schedule_service.get_snapshot_for_session(session)
         suffix = "旧快照仍保留。" if old_snapshot else "当前继续使用静态日程。"
+        logger.warning(
+            f"{tag()} /schedule regenerate 失败: error={result.error_type} message={result.message}"
+        )
         yield f"生成失败：{result.message or result.error_type}。{suffix}"

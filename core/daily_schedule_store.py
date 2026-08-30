@@ -263,8 +263,9 @@ class DailyScheduleSnapshotStore:
         retention_days: int,
         today: datetime.date,
         timezone: str = "",
+        detail: str = "",
     ) -> bool:
-        """记录去详情化失败状态，不覆盖同日仍可用的旧快照。"""
+        """记录失败状态（含底层详情），不覆盖同日仍可用的旧快照。"""
         key = self.snapshot_key(persona_hash, local_date, timezone)
         old_snapshots = copy.deepcopy(self._snapshots)
         old_failures = copy.deepcopy(self._failures)
@@ -274,6 +275,7 @@ class DailyScheduleSnapshotStore:
             "timezone": str(timezone or "").strip(),
             "failed_at": failed_at,
             "error_type": str(error_type or "unknown")[:80],
+            "detail": str(detail or "").strip(),
         }
         self._cleanup_in_memory(retention_days=retention_days, today=today)
         if self._save():

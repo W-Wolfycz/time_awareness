@@ -157,7 +157,7 @@ class ReminderService:
         prompt_parts = self._build_task_prompt_parts(session, tasks)
         prompt = "\n".join(prompt_parts)
         if not prompt.strip():
-            logger.info(f"{tag()} ℹ️ 跳过空提醒 session={session} tasks={len(tasks)}")
+            logger.debug(f"{tag()} ℹ️ 跳过空提醒 session={session} tasks={len(tasks)}")
             return TriggerResult.ok()
         if is_late:
             late_text = self.late_prompt().replace(

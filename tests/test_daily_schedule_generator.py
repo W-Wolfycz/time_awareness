@@ -95,3 +95,32 @@ def test_validate_boundary_state_rejects_bad_values():
         "energy", "sleep_debt", "focus", "social_energy", "motivation",
         "physical_state", "daily_theme", "unfinished_plans",
     }
+
+
+def test_validate_boundary_state_daily_style():
+    """2.1.0 新维度：daily_style 别名归一化、长度与 XML 校验。"""
+    from time_awareness.llm.daily_schedule_generator import _validate_boundary_state
+
+    state = _validate_boundary_state({"风格": "慵懒"})
+    assert state["daily_style"] == "慵懒"
+    state = _validate_boundary_state({"状态色彩": "活力"})
+    assert state["daily_style"] == "活力"
+    state = _validate_boundary_state({"气质": "元气"})
+    assert state["daily_style"] == "元气"
+    with pytest.raises(ScheduleValidationError, match="超出长度上限"):
+        _validate_boundary_state({"daily_style": "超" * 13})
+    with pytest.raises(ScheduleValidationError, match="含控制字符"):
+        _validate_boundary_state({"daily_style": "带<标签>"})
+
+
+def test_unfinished_plans_empty_array_means_cleared():
+    """空数组是显式清空（保留 []），与键缺失（继承）不同。"""
+    from time_awareness.llm.daily_schedule_generator import _validate_boundary_state
+
+    assert _validate_boundary_state({"unfinished_plans": []}) == {"unfinished_plans": []}
+    assert _validate_boundary_state({"unfinished_plans": ["整理资料"]}) == {
+        "unfinished_plans": ["整理资料"]
+    }
+    assert "unfinished_plans" not in _validate_boundary_state({})  # 键缺失留给回填层
+    with pytest.raises(ScheduleValidationError, match="必须是数组"):
+        _validate_boundary_state({"unfinished_plans": "待办"})

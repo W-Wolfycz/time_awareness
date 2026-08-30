@@ -92,6 +92,7 @@ const api = {
     apiGet('schedules/detail', { persona_hash, date, timezone }),
   saveSchedule: (payload) => apiPost('schedules/save', payload),
   getStaticSchedules: () => apiGet('static-schedules'),
+  testWeather: () => apiGet('weather/test'),
   saveStaticSchedules: (payload) => apiPost('static-schedules/save', payload),
 };
 
@@ -177,7 +178,7 @@ async function renderDashboard() {
 
     const s = state.stats;
 
-    // ---- Hero card：时间感知面板 ----
+    // ---- Hero card：时笺面板 ----
     // GMT 时区尾巴（贴在主时间后下对齐；未配时区时为空）
     const tzGmtHtml = s.tz_gmt
       ? `<span class="hero-time-tz">${escapeHtml(s.tz_gmt)}</span>`
@@ -296,7 +297,10 @@ async function renderDashboard() {
       </div>
     `;
 
-    wrap.innerHTML = heroHtml + metricsHtml;
+    const weatherHtml = await buildWeatherCardHtml();
+
+    wrap.innerHTML = heroHtml + weatherHtml + metricsHtml;
+    bindWeatherTest();
     // 启动 hero 时钟（每秒 tick 一次 time_display 字段，其他字段保持渲染时刻的值）。
     // 非 dashboard 视图（如取消/建任务后刷新计数）不启动后台空转定时器。
     if (state.currentView === 'dashboard') {
@@ -308,6 +312,92 @@ async function renderDashboard() {
     stopHeroClock();
     wrap.innerHTML = `<div class="empty-state">⚠️ ${escapeHtml(e.message)}</div>`;
   }
+}
+
+// ==================== [4a] 随机天气卡片 ====================
+
+const WEATHER_ICONS = {
+  晴: '☀️', 多云: '⛅', 阴: '☁️', 小雨: '🌧️', 中雨: '🌧️',
+  大雨: '🌧️', 暴雨: '🌧️', 雷阵雨: '⛈️', 雪: '❄️', 小雪: '🌨️',
+  大雪: '❄️', 大风: '🌬️', 雾: '🌫️',
+};
+
+function weatherIcon(text) {
+  return WEATHER_ICONS[text] || '🌤️';
+}
+
+function buildWeatherCellHtml(weather) {
+  const day = (weather.text_day || '').trim();
+  const night = (weather.text_night || '').trim();
+  const same = !night || night === day;
+  const parts = [
+    `<span class="weather-cell-icon">${weatherIcon(day)}</span>`,
+    `<span class="weather-cell-text">${escapeHtml(day)}</span>`,
+  ];
+  if (!same) {
+    parts.push(
+      '<span class="weather-cell-arrow">→</span>',
+      `<span class="weather-cell-icon">${weatherIcon(night)}</span>`,
+      `<span class="weather-cell-text">${escapeHtml(night)}</span>`
+    );
+  }
+  const temp = (weather.temp_min != null && weather.temp_max != null)
+    ? `<span class="weather-cell-temp">${weather.temp_min}~${weather.temp_max}°C</span>`
+    : '';
+  return parts.join('') + temp;
+}
+
+async function buildWeatherCardHtml() {
+  try {
+    const resp = await api.testWeather();
+    if (resp && resp.success && resp.weather) {
+      return `
+      <div class="card weather-test-card">
+        <div class="weather-test-row">
+          <span class="weather-test-label">🌦️ 今日随机天气</span>
+          <span class="weather-cells">${buildWeatherCellHtml(resp.weather)}</span>
+        </div>
+      </div>
+      `;
+    }
+  } catch (e) {
+    // 查询异常按未启用处理：显示按钮入口
+  }
+  return `
+    <div class="card weather-test-card">
+      <div class="weather-test-row">
+        <span class="weather-test-label">🌦️ 今日随机天气</span>
+        <button class="btn btn-sm" id="weather-test-btn" type="button">查看今日天气</button>
+      </div>
+      <div class="weather-test-result" id="weather-test-result"></div>
+    </div>
+  `;
+}
+
+function bindWeatherTest() {
+  const btn = document.getElementById('weather-test-btn');
+  const result = document.getElementById('weather-test-result');
+  if (!btn || !result) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    result.textContent = '查询中…';
+    result.className = 'weather-test-result';
+    try {
+      const resp = await api.testWeather();
+      if (resp && resp.success) {
+        result.textContent = `✅ ${resp.message}`;
+        result.className = 'weather-test-result weather-test-ok';
+      } else {
+        result.textContent = `⚠️ ${(resp && resp.error) || '查询失败'}`;
+        result.className = 'weather-test-result weather-test-err';
+      }
+    } catch (e) {
+      result.textContent = `⚠️ ${escapeHtml(e.message)}`;
+      result.className = 'weather-test-result weather-test-err';
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 // ==================== [4b] hero 时钟（轻量 setInterval，仅更新时间显示） ====================
