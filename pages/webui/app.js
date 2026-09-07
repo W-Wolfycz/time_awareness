@@ -1,11 +1,4 @@
-/**
- * time_awareness WebUI
- *
- * 5 个 view：概览 / 日历（月视图）/ 任务 / 静态日程 / 人格日程
- * vanilla JS，无框架，无 URL router（DOM 显隐切换）
- */
-
-// ==================== [1] 桥接 + 全局状态 ====================
+// time_awareness WebUI：5 个 view，vanilla JS 无框架
 const PLUGIN_NAME = 'time_awareness';
 
 // 兼容 AstrBot 主 webui 注入的 bridge；缺失时降级 fetch（用相对路径）
@@ -49,14 +42,13 @@ const VIEW_TITLES = {
   schedules: '人格日程',
 };
 
-// ==================== [2] API client ====================
-// 桥接模式下 endpoint 不带插件名前缀——父窗口自动拼 /{plugin_name}/<endpoint>
-// 降级模式（未注入 bridge）按 AstrBot 4.26.3 路由拼 /api/plug/{plugin_name}/<endpoint>
+const LOADING_HTML = '<div class="loading-wrap"><span class="spinner"></span> 加载中...</div>';
+
+// 桥接模式不带前缀；降级模式拼 /api/plug/{plugin_name}/<endpoint>
 async function apiGet(endpoint, params = {}) {
   if (bridge && typeof bridge.apiGet === 'function') {
     return bridge.apiGet(endpoint, params);
   }
-  // 降级：直接 fetch（仅本地开发调试）
   const qs = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
@@ -103,7 +95,6 @@ async function waitBridgeReady() {
   }
 }
 
-// ==================== [3] view switcher ====================
 function applyView(name) {
   state.currentView = name;
   // 离开 dashboard 时停止时钟（避免后台空跑 setInterval）
@@ -158,8 +149,6 @@ async function refreshCurrentView() {
   }
 }
 
-// ==================== [4] render: dashboard ====================
-
 // 工作日性质 → chip 配色类名映射
 const WORKDAY_CHIP_CLASS = {
   workday: 'workday-chip-workday',
@@ -178,34 +167,24 @@ async function renderDashboard() {
 
     const s = state.stats;
 
-    // ---- Hero card：时笺面板 ----
-    // GMT 时区尾巴（贴在主时间后下对齐；未配时区时为空）
     const tzGmtHtml = s.tz_gmt
       ? `<span class="hero-time-tz">${escapeHtml(s.tz_gmt)}</span>`
       : '';
     const chipClass = WORKDAY_CHIP_CLASS[s.workday_kind] || 'workday-chip-unknown';
-    // 工作日 chip 短文本：从 "工作日（周五）" 拆出 "工作日"
-    // weekday_display 已单独提供"周五"，chip 内只保留性质短语避免重复
     const workdayShort = (s.workday_label || '').split('（')[0].trim() || (s.workday_label || '');
-    // 工作日 chip：开关关闭（workday_label 空）时不渲染
     const workdayChipHtml = s.workday_label
       ? `<span class="workday-chip ${chipClass}">${escapeHtml(workdayShort)}</span>`
       : '';
-    // 农历年生肖 chip：未启用或异常时不渲染
     const lunarYearChipHtml = s.lunar_year_chip
       ? `<span class="lunar-year-chip">${escapeHtml(s.lunar_year_chip)}</span>`
       : '';
-    // 农历月日：紧贴在 chip 后，前面不加逗号
     const lunarMdHtml = s.lunar_month_day
       ? `<span class="date-info-seg">${escapeHtml(s.lunar_month_day)}</span>`
       : '';
-    // 周X：始终显示（除非后端字段缺失）
     const weekdayHtml = s.weekday_display
       ? `<span class="date-info-seg">${escapeHtml(s.weekday_display)}</span>`
       : '';
-    // 黄历 chip 行：紧贴 date-info 下方（与农历同语义块）
-    // 拆 3 个 chip：📜干支冲煞（紫）/ 宜（绿）/ 忌（红）
-    // 任一字段为空则跳过该 chip；全部为空时不渲染整行
+    // 拆 3 个 chip：干支冲煞 / 宜 / 忌；任一字段为空跳过，全空不渲染整行
     const almanacChips = [];
     if (s.almanac_gz_day) {
       const chong = s.almanac_chong_sha ? ` ${escapeHtml(s.almanac_chong_sha)}` : '';
@@ -245,7 +224,6 @@ async function renderDashboard() {
       </div>
     `;
 
-    // ---- 原 metrics-grid（统计卡片） ----
     const metricsHtml = `
       <div class="metrics-grid">
         <div class="metric-card">
@@ -301,8 +279,7 @@ async function renderDashboard() {
 
     wrap.innerHTML = heroHtml + weatherHtml + metricsHtml;
     bindWeatherTest();
-    // 启动 hero 时钟（每秒 tick 一次 time_display 字段，其他字段保持渲染时刻的值）。
-    // 非 dashboard 视图（如取消/建任务后刷新计数）不启动后台空转定时器。
+    // 仅 dashboard 启动 hero 时钟，其他视图不后台空转
     if (state.currentView === 'dashboard') {
       startHeroClock(s.time_display);
     } else {
@@ -310,11 +287,9 @@ async function renderDashboard() {
     }
   } catch (e) {
     stopHeroClock();
-    wrap.innerHTML = `<div class="empty-state">⚠️ ${escapeHtml(e.message)}</div>`;
+    wrap.innerHTML = errorStateHtml(e.message);
   }
 }
-
-// ==================== [4a] 随机天气卡片 ====================
 
 const WEATHER_ICONS = {
   晴: '☀️', 多云: '⛅', 阴: '☁️', 小雨: '🌧️', 中雨: '🌧️',
@@ -344,7 +319,10 @@ function buildWeatherCellHtml(weather) {
   const temp = (weather.temp_min != null && weather.temp_max != null)
     ? `<span class="weather-cell-temp">${weather.temp_min}~${weather.temp_max}°C</span>`
     : '';
-  return parts.join('') + temp;
+  const variation = (weather.variation || '').trim()
+    ? `<div class="weather-cell-variation">${escapeHtml(weather.variation)}</div>`
+    : '';
+  return parts.join('') + temp + variation;
 }
 
 async function buildWeatherCardHtml() {
@@ -400,7 +378,6 @@ function bindWeatherTest() {
   });
 }
 
-// ==================== [4b] hero 时钟（轻量 setInterval，仅更新时间显示） ====================
 let _heroClockHandle = null;
 
 function stopHeroClock() {
@@ -410,12 +387,7 @@ function stopHeroClock() {
   }
 }
 
-/**
- * 从服务端 time_display（HH:MM:SS）起步，每秒 +1 推进时间。
- * 不依赖浏览器时区——直接拿服务端给的字符串做整数累加，
- * 这样插件配置时区与显示时区始终一致。
- * DOM 不存在（用户切走 view）时自动停止。
- */
+// 从服务端 HH:MM:SS 起步每秒 +1；不依赖浏览器时区，DOM 不存在时自动停止
 function startHeroClock(timeDisplay) {
   stopHeroClock();
   const m = String(timeDisplay || '').match(/^(\d{2}):(\d{2}):(\d{2})$/);
@@ -437,7 +409,6 @@ function startHeroClock(timeDisplay) {
   _heroClockHandle = setInterval(tick, 1000);
 }
 
-// ==================== [5] render: calendar 月视图 ====================
 const WEEKDAY_HEADERS = ['一', '二', '三', '四', '五', '六', '日'];
 
 function getNowInBrowser() {
@@ -493,7 +464,6 @@ async function renderCalendar() {
   const grid = document.getElementById('calendar-grid');
   const titleEl = document.getElementById('cal-title');
 
-  // 首次进入日历视图：初始化为浏览器当前年月
   if (state.calendar.year === 0) {
     const now = getNowInBrowser();
     state.calendar.year = now.year;
@@ -513,14 +483,12 @@ async function renderCalendar() {
     ) return;
     if (!resp.success) throw new Error(resp.error || '获取月历失败');
 
-    // 按 day 聚合（builtin + custom 合并）
     const byDay = {};
     [...resp.builtin, ...resp.custom].forEach(e => {
       const d = e.day;
       if (!byDay[d]) byDay[d] = [];
       byDay[d].push(e);
     });
-    // 同日内 builtin 在前、custom 在后（颜色对比更清晰）
     Object.values(byDay).forEach(arr => {
       arr.sort((a, b) => {
         const sa = a.source === 'builtin' ? 0 : 1;
@@ -532,26 +500,21 @@ async function renderCalendar() {
     const offset = firstDayOffset(year, month);
     const total = daysInMonth(year, month);
     const cells = [];
-    // 前置空格
     for (let i = 0; i < offset; i++) cells.push(renderCalendarCell(null, []));
-    // 当月每天
     for (let d = 1; d <= total; d++) {
       cells.push(renderCalendarCell(d, byDay[d] || []));
     }
-    // 后置空格凑满 6 行（42 格）
     while (cells.length < 42) cells.push(renderCalendarCell(null, []));
 
     grid.innerHTML = renderWeekdayHeader() + cells.join('');
 
-    // 绑定 "+N 更多" 点击
     grid.querySelectorAll('.calendar-more').forEach(el => {
       el.addEventListener('click', () => {
         const day = parseInt(el.dataset.date, 10);
         showDayModal(year, month, day, byDay[day] || []);
       });
     });
-    // chip：仅在文本被 ellipsis 截断时启用 tooltip
-    // 完整显示的 chip 完全不交互（无 tooltip、无 cursor 变化）
+    // chip 仅在文本被 ellipsis 截断时启用 tooltip
     grid.querySelectorAll('.calendar-chip').forEach(el => {
       if (el.scrollWidth <= el.clientWidth) return; // 未截断，跳过
       el.classList.add('truncated');
@@ -598,7 +561,20 @@ function showDayModal(year, month, day, events) {
   document.getElementById('day-modal').classList.add('active');
 }
 
-// ==================== [6] render: tasks ====================
+function taskKindBadge(kind) {
+  if (kind === 'calendar') return '<span class="badge badge-primary">日历</span>';
+  if (kind === 'user') return '<span class="badge badge-success">手动</span>';
+  return '<span class="badge badge-warning">后续</span>';
+}
+
+function taskHintDisplay(t) {
+  return t.hint ? escapeHtml(t.hint) : '<span style="color: var(--text-muted);">—</span>';
+}
+
+function taskSessionCell(t) {
+  return `<td data-label="会话"><code style="font-family: var(--mono); font-size: 12px; color: var(--text-muted); word-break: break-all;">${escapeHtml(t.session)}</code></td>`;
+}
+
 async function renderTasks() {
   const wrap = document.getElementById('tasks-content');
   try {
@@ -613,18 +589,11 @@ async function renderTasks() {
     }
 
     const rows = state.tasks.map(t => {
-      let kindBadge;
-      if (t.kind === 'calendar') {
-        kindBadge = '<span class="badge badge-primary">日历</span>';
-      } else if (t.kind === 'user') {
-        kindBadge = '<span class="badge badge-success">手动</span>';
-      } else {
-        kindBadge = '<span class="badge badge-warning">后续</span>';
-      }
+      const kindBadge = taskKindBadge(t.kind);
       const targetInfo = t.target_user_id
         ? ` → <code style="font-family: var(--mono); color: var(--text-muted);">${escapeHtml(t.target_user_id)}</code>`
         : '';
-      const hintDisplay = t.hint ? escapeHtml(t.hint) : '<span style="color: var(--text-muted);">—</span>';
+      const hintDisplay = taskHintDisplay(t);
       const retryBadge = t.status === 'retry_wait'
         ? `<span class="badge badge-warning" title="已尝试 ${Number(t.attempts || 0)} 次">等待重试</span>`
         : '';
@@ -635,7 +604,7 @@ async function renderTasks() {
         <tr>
           <td data-label="类型">${kindBadge} ${retryBadge}</td>
           <td data-label="触发时间" class="col-time">${fireDisplay}</td>
-          <td data-label="会话"><code style="font-family: var(--mono); font-size: 12px; color: var(--text-muted); word-break: break-all;">${escapeHtml(t.session)}</code></td>
+          ${taskSessionCell(t)}
           <td data-label="内容">${hintDisplay}${targetInfo}</td>
           <td data-label="操作" class="col-actions">
             <button class="btn btn-danger btn-sm" data-cancel-id="${escapeAttr(t.id)}">取消</button>
@@ -652,16 +621,9 @@ async function renderTasks() {
     };
 
     const finishedRows = finished.map(t => {
-      let kindBadge;
-      if (t.kind === 'calendar') {
-        kindBadge = '<span class="badge badge-primary">日历</span>';
-      } else if (t.kind === 'user') {
-        kindBadge = '<span class="badge badge-success">手动</span>';
-      } else {
-        kindBadge = '<span class="badge badge-warning">后续</span>';
-      }
+      const kindBadge = taskKindBadge(t.kind);
       const meta = statusMeta[t.status] || { cls: 'badge-muted', label: escapeHtml(t.status) };
-      const hintDisplay = t.hint ? escapeHtml(t.hint) : '<span style="color: var(--text-muted);">—</span>';
+      const hintDisplay = taskHintDisplay(t);
       const errorDisplay = t.last_error
         ? `<div style="font-size:11px;color:var(--danger, #e5484d);" title="${escapeAttr(t.last_error)}">${escapeHtml(String(t.last_error).slice(0, 60))}</div>`
         : '';
@@ -670,7 +632,7 @@ async function renderTasks() {
           <td data-label="类型">${kindBadge} <span class="badge ${meta.cls}">${meta.label}</span></td>
           <td data-label="触发时间" class="col-time">${escapeHtml(formatIsoLocal(t.fire_at_iso))}</td>
           <td data-label="结束时间" class="col-time">${escapeHtml(formatIsoLocal(t.terminal_at_iso))}</td>
-          <td data-label="会话"><code style="font-family: var(--mono); font-size: 12px; color: var(--text-muted); word-break: break-all;">${escapeHtml(t.session)}</code></td>
+          ${taskSessionCell(t)}
           <td data-label="内容">${hintDisplay}${errorDisplay}</td>
         </tr>
       `;
@@ -725,7 +687,7 @@ async function renderTasks() {
       });
     });
   } catch (e) {
-    wrap.innerHTML = `<div class="empty-state">⚠️ ${escapeHtml(e.message)}</div>`;
+    wrap.innerHTML = errorStateHtml(e.message);
   }
 }
 
@@ -748,7 +710,6 @@ function askCancelTask(task) {
       }
       toast('success', '任务已取消');
       renderTasks();
-      // 同步刷新 dashboard 计数（如果用户切回去）
       renderDashboard().catch(() => {});
     } catch (e) {
       toast('error', `取消失败: ${e.message}`);
@@ -756,10 +717,7 @@ function askCancelTask(task) {
   });
 }
 
-// ==================== [6b] 新增任务 modal ====================
-
 async function openCreateTaskModal() {
-  // 拉取 options（白名单为空则提前提示）
   let opts;
   try {
     const resp = await api.getTaskOptions();
@@ -776,7 +734,6 @@ async function openCreateTaskModal() {
     return;
   }
 
-  // 填充表单
   const sel = document.getElementById('tf-session');
   sel.innerHTML = opts.sessions
     .map(s => `<option value="${escapeAttr(s)}">${escapeHtml(s)}</option>`)
@@ -795,15 +752,10 @@ async function submitCreateTask() {
   const hint = document.getElementById('tf-hint').value.trim();
   const target_user_id = document.getElementById('tf-target').value.trim();
 
-  // 体验性预检（非硬约束，后端会再校验）
   if (!fire_at_local) { toast('error', '请填写触发时间'); return; }
   if (!hint) { toast('error', '请填写提醒内容'); return; }
 
-  // 实时预检：默认时间由后端按插件时区生成，浏览器按本地时区解释
-  // 「无时区字符串」会产生固定偏移（浏览器时区 ≠ 插件时区时），用
-  // server_now_ms 与默认值之差算出该偏移并校正，避免时区偏东的浏览器
-  // 一律误拒。校正后与浏览器真实时钟比较，停留过久也不依赖旧快照。
-  // 余量 90s 比后端 60s 严格，确保前端先拦下
+  // 用 server_now_ms 校正「无时区字符串」的浏览器本地偏移；余量 90s 比后端 60s 严格
   const opts = state.taskOptions || {};
   let browserOffset = 0;
   if (opts.server_now_ms && opts.default_fire_at_local) {
@@ -843,8 +795,6 @@ async function submitCreateTask() {
 function closeCreateTaskModal() {
   document.getElementById('task-create-modal').classList.remove('active');
 }
-
-// ==================== [7] modal / toast / tooltip 辅助 ====================
 
 /** 自定义 hover tooltip：跟随鼠标位置，无浏览器原生 1-2s 延迟 */
 let _chipTooltipEl = null;
@@ -921,7 +871,6 @@ function toast(type, message) {
   }, 3000);
 }
 
-// ==================== 工具函数 ====================
 function escapeHtml(str) {
   if (str === undefined || str === null) return '';
   return String(str)
@@ -936,16 +885,17 @@ function escapeAttr(str) {
   return escapeHtml(str);
 }
 
+function errorStateHtml(message) {
+  return `<div class="empty-state">⚠️ ${escapeHtml(message)}</div>`;
+}
+
 /** 把 ISO 字符串原样展示为 YYYY-MM-DD HH:MM（避免浏览器时区转换） */
 function formatIsoLocal(iso) {
   if (!iso) return '—';
-  // 截取 "YYYY-MM-DDTHH:MM" 部分，把 T 换成空格
   const m = String(iso).match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
   if (!m) return iso;
   return `${m[1]} ${m[2]}`;
 }
-
-// ==================== [8b] 人格日程 ====================
 
 const SLOT_MODE_LABEL = {
   finished: '已结束 · 只读',
@@ -956,15 +906,8 @@ const SLOT_MODE_LABEL = {
 };
 
 // ==================== 时区安全工具 ====================
-// 快照后端存储使用 IANA key（如 Asia/Shanghai）或固定偏移回退键（UTC+08:00）
-// 或 system-local。所有 Intl.DateTimeFormat 调用必须先经 safeTimeZone 验证：
-// 固定偏移/无效时区不能直接当 timeZone 传给 Intl（会抛 RangeError 使按钮失效）。
-// 计算基于 IANA；面向用户统一显示为 UTC+x（必要时带分钟）。
-
 function safeTimeZone(tz) {
-  // 只接受明确的 IANA 区域格式（如 Asia/Shanghai、Etc/UTC）或 UTC/GMT；
-  // 拒绝 CST 之类歧义缩写（不同 ICU 实现可能把 CST 解析成不同含义）以及
-  // UTC+08:00 固定偏移。Intl.DateTimeFormat 构造器作二次校验，无效返回 undefined。
+  // 只接受 IANA 区域格式；拒绝 CST 等歧义缩写与固定偏移
   if (typeof tz !== 'string') return undefined;
   const name = tz.trim();
   if (!name) return undefined;
@@ -1034,34 +977,27 @@ function timezoneDisplayLabel(tz) {
   return name;
 }
 
-function formatInTimeZone(date, tz, locale, options) {
-  // 安全格式化：IANA → Intl；固定偏移 → 平移后按 UTC 格式化（等价本地墙钟）；
-  // system-local/无效 → 浏览器本地。永不因无效时区抛 RangeError。
+// IANA → Intl；固定偏移 → 平移后按 UTC；system-local/无效 → 浏览器本地
+function formatInTimeZoneGeneric(date, tz, locale, options, method) {
   const opts = options || {};
   const iana = safeTimeZone(tz);
   if (iana) {
-    return new Intl.DateTimeFormat(locale, Object.assign({}, opts, { timeZone: iana })).format(date);
+    return new Intl.DateTimeFormat(locale, Object.assign({}, opts, { timeZone: iana }))[method](date);
   }
   const off = fixedOffsetMinutes(tz);
   if (off !== null && Number.isFinite(off)) {
     const shifted = new Date(date.getTime() + off * 60000);
-    return new Intl.DateTimeFormat(locale, Object.assign({}, opts, { timeZone: 'UTC' })).format(shifted);
+    return new Intl.DateTimeFormat(locale, Object.assign({}, opts, { timeZone: 'UTC' }))[method](shifted);
   }
-  return new Intl.DateTimeFormat(locale, opts).format(date);
+  return new Intl.DateTimeFormat(locale, opts)[method](date);
+}
+
+function formatInTimeZone(date, tz, locale, options) {
+  return formatInTimeZoneGeneric(date, tz, locale, options, 'format');
 }
 
 function formatToPartsInTimeZone(date, tz, locale, options) {
-  const opts = options || {};
-  const iana = safeTimeZone(tz);
-  if (iana) {
-    return new Intl.DateTimeFormat(locale, Object.assign({}, opts, { timeZone: iana })).formatToParts(date);
-  }
-  const off = fixedOffsetMinutes(tz);
-  if (off !== null && Number.isFinite(off)) {
-    const shifted = new Date(date.getTime() + off * 60000);
-    return new Intl.DateTimeFormat(locale, Object.assign({}, opts, { timeZone: 'UTC' })).formatToParts(shifted);
-  }
-  return new Intl.DateTimeFormat(locale, opts).formatToParts(date);
+  return formatInTimeZoneGeneric(date, tz, locale, options, 'formatToParts');
 }
 
 let scheduleClockTimer = null;
@@ -1136,14 +1072,14 @@ async function renderSchedules() {
   const wrap = document.getElementById('schedules-content');
   const s = state.schedules;
   if (!s.personasLoaded) {
-    wrap.innerHTML = '<div class="loading-wrap"><span class="spinner"></span> 加载中...</div>';
+    wrap.innerHTML = LOADING_HTML;
     try {
       const resp = await api.getSchedulePersonas();
       if (!resp.success) throw new Error(resp.error || '获取人格列表失败');
       s.personas = resp.personas || [];
       s.personasLoaded = true;
     } catch (e) {
-      wrap.innerHTML = `<div class="empty-state">⚠️ ${escapeHtml(e.message)}</div>`;
+      wrap.innerHTML = errorStateHtml(e.message);
       return;
     }
   }
@@ -1157,7 +1093,6 @@ async function renderSchedules() {
   const dateSelect = document.getElementById('sch-date');
   const currentKey = personaSelect.value || (s.personas[0] && s.personas[0].key);
 
-  // 填充人格下拉（仅当选项集合变化时重建，保留当前选择）
   const currentKeys = Array.from(personaSelect.options).map(o => o.value);
   const expectedKeys = s.personas.map(p => p.key);
   const needsRebuild = currentKeys.length !== expectedKeys.length ||
@@ -1202,7 +1137,7 @@ async function loadScheduleDetail(personaKey, identityValue) {
     return;
   }
   const requestToken = ++s.detailToken;
-  wrap.innerHTML = '<div class="loading-wrap"><span class="spinner"></span> 加载中...</div>';
+  wrap.innerHTML = LOADING_HTML;
   try {
     const resp = await api.getScheduleDetail(personaKey, dateText, timezone);
     if (requestToken !== s.detailToken) return; // 过期响应：已有更新的选择
@@ -1221,7 +1156,7 @@ async function loadScheduleDetail(personaKey, identityValue) {
     renderScheduleCards();
   } catch (e) {
     if (requestToken !== s.detailToken) return;
-    wrap.innerHTML = `<div class="empty-state">⚠️ ${escapeHtml(e.message)}</div>`;
+    wrap.innerHTML = errorStateHtml(e.message);
   }
 }
 
@@ -1240,7 +1175,6 @@ function renderScheduleCards() {
   if (saveTop) saveTop.style.display = editingEnabled ? '' : 'none';
   const theme = detail.theme || {};
   const themeText = theme.archetype || Object.values(theme).filter(Boolean).join(' · ') || '—';
-  // 日界状态摘要：theme 已并入 boundary（daily_theme 承载当日基调）
   const boundary = detail.boundary_state || {};
   const themePart = boundary.daily_theme || themeText || '—';
   const unfinished = Array.isArray(boundary.unfinished_plans) && boundary.unfinished_plans.length
@@ -1443,10 +1377,7 @@ async function saveScheduleDraft() {
   }
 }
 
-// ==================== [8c] 静态日程配置 ====================
-// 高基数配置不再交给 AstrBot TemplateListEditor：这里只渲染当前页的紧凑行，
-// 长状态文本仅在唯一的编辑 modal 中挂载。
-
+// 高基数配置只渲染当前页紧凑行，长状态文本仅挂载在唯一编辑 modal
 function staticSchedulePageItems(slots, page, pageSize) {
   const safeSlots = Array.isArray(slots) ? slots : [];
   const size = Math.max(1, Number(pageSize) || 20);
@@ -1473,7 +1404,7 @@ async function renderStaticSchedules() {
 
 async function loadStaticSchedules() {
   const wrap = document.getElementById('static-schedules-content');
-  wrap.innerHTML = '<div class="loading-wrap"><span class="spinner"></span> 加载中...</div>';
+  wrap.innerHTML = LOADING_HTML;
   try {
     const resp = await api.getStaticSchedules();
     if (!resp.success) throw new Error(resp.error || '获取静态日程失败');
@@ -1487,8 +1418,26 @@ async function loadStaticSchedules() {
     s.loaded = true;
     renderStaticScheduleTable();
   } catch (e) {
-    wrap.innerHTML = `<div class="empty-state">⚠️ ${escapeHtml(e.message)}</div>`;
+    wrap.innerHTML = errorStateHtml(e.message);
   }
+}
+
+function renderStaticScheduleRow(slot, index, saving, total) {
+  const stateText = String(slot.state_prompt || '').replace(/\s+/g, ' ').trim();
+  const preview = stateText.length > 90 ? `${stateText.slice(0, 87)}…` : (stateText || '—');
+  return `
+      <tr>
+        <td data-label="顺序"><span class="static-order">${index + 1}</span></td>
+        <td data-label="时间" class="col-time">${escapeHtml(slot.start_time || '')} ─ ${escapeHtml(slot.end_time || '')}</td>
+        <td data-label="名称">${escapeHtml(slot.name || '—')}</td>
+        <td data-label="状态"><div class="static-state-preview" title="${escapeAttr(stateText)}">${escapeHtml(preview)}</div></td>
+        <td class="col-actions" data-label="操作">
+          <button class="btn btn-sm static-row-action" data-action="up" data-index="${index}" title="上移"${index === 0 || saving ? ' disabled' : ''}>↑</button>
+          <button class="btn btn-sm static-row-action" data-action="down" data-index="${index}" title="下移"${index === total - 1 || saving ? ' disabled' : ''}>↓</button>
+          <button class="btn btn-sm static-row-action" data-action="edit" data-index="${index}"${saving ? ' disabled' : ''}>编辑</button>
+          <button class="btn btn-sm static-row-action static-delete" data-action="delete" data-index="${index}"${saving ? ' disabled' : ''}>删除</button>
+        </td>
+      </tr>`;
 }
 
 function renderStaticScheduleTable() {
@@ -1512,23 +1461,7 @@ function renderStaticScheduleTable() {
   const dirtyBadge = s.dirty
     ? '<span class="badge badge-warning">有未保存修改</span>'
     : '<span class="badge badge-success">已保存</span>';
-  const rows = paged.items.map(({ slot, index }) => {
-    const stateText = String(slot.state_prompt || '').replace(/\s+/g, ' ').trim();
-    const preview = stateText.length > 90 ? `${stateText.slice(0, 87)}…` : (stateText || '—');
-    return `
-      <tr>
-        <td data-label="顺序"><span class="static-order">${index + 1}</span></td>
-        <td data-label="时间" class="col-time">${escapeHtml(slot.start_time || '')} ─ ${escapeHtml(slot.end_time || '')}</td>
-        <td data-label="名称">${escapeHtml(slot.name || '—')}</td>
-        <td data-label="状态"><div class="static-state-preview" title="${escapeAttr(stateText)}">${escapeHtml(preview)}</div></td>
-        <td class="col-actions" data-label="操作">
-          <button class="btn btn-sm static-row-action" data-action="up" data-index="${index}" title="上移"${index === 0 || s.saving ? ' disabled' : ''}>↑</button>
-          <button class="btn btn-sm static-row-action" data-action="down" data-index="${index}" title="下移"${index === s.slots.length - 1 || s.saving ? ' disabled' : ''}>↓</button>
-          <button class="btn btn-sm static-row-action" data-action="edit" data-index="${index}"${s.saving ? ' disabled' : ''}>编辑</button>
-          <button class="btn btn-sm static-row-action static-delete" data-action="delete" data-index="${index}"${s.saving ? ' disabled' : ''}>删除</button>
-        </td>
-      </tr>`;
-  }).join('');
+  const rows = paged.items.map(({ slot, index }) => renderStaticScheduleRow(slot, index, s.saving, s.slots.length)).join('');
   const pagination = paged.pageCount > 1
     ? `<div class="static-pagination">
         <button class="btn btn-sm" data-static-page="${paged.page - 1}"${paged.page <= 0 ? ' disabled' : ''}>上一页</button>
@@ -1725,7 +1658,16 @@ async function saveStaticSchedules() {
   }
 }
 
-// ==================== [9] init ====================
+function bindModalOverlayClose(id, closeFn) {
+  document.getElementById(id).addEventListener('click', (e) => {
+    if (e.target.id === id) closeFn();
+  });
+}
+
+function closeStaticAddMenu() {
+  document.getElementById('static-add-menu').classList.remove('open');
+}
+
 function bindNav() {
   document.querySelectorAll('.nav-item').forEach(btn => {
     btn.addEventListener('click', () => switchView(btn.dataset.view));
@@ -1737,20 +1679,10 @@ function bindNav() {
   document.getElementById('day-modal-close').addEventListener('click', () => {
     document.getElementById('day-modal').classList.remove('active');
   });
-  document.getElementById('day-modal').addEventListener('click', (e) => {
-    if (e.target.id === 'day-modal') {
-      document.getElementById('day-modal').classList.remove('active');
-    }
-  });
-  document.getElementById('confirm-modal').addEventListener('click', (e) => {
-    if (e.target.id === 'confirm-modal') {
-      document.getElementById('confirm-modal').classList.remove('active');
-    }
-  });
-  // 新增任务 modal
+  bindModalOverlayClose('day-modal', () => document.getElementById('day-modal').classList.remove('active'));
+  bindModalOverlayClose('confirm-modal', () => document.getElementById('confirm-modal').classList.remove('active'));
   document.getElementById('task-create-btn').addEventListener('click', openCreateTaskModal);
   document.getElementById('tf-cancel').addEventListener('click', closeCreateTaskModal);
-  // 人格日程
   const applyScheduleIdentity = (personaKey, identityValue, rebuildDates) => {
     if (rebuildDates) {
       const persona = state.schedules.personas.find(p => p.key === personaKey);
@@ -1804,34 +1736,29 @@ function bindNav() {
     }
     refreshCurrentView();
   });
-  // 静态日程（固定工具栏 + 单一编辑 modal）
   document.getElementById('static-add-main').addEventListener('click', (event) => {
     event.stopPropagation();
     document.getElementById('static-add-menu').classList.toggle('open');
   });
   document.querySelectorAll('#static-add-menu .dropdown-item').forEach(item => {
     item.addEventListener('click', () => {
-      document.getElementById('static-add-menu').classList.remove('open');
+      closeStaticAddMenu();
       openStaticSlotModal(null, item.dataset.preset || 'time_slot');
     });
   });
   document.addEventListener('click', (event) => {
     const dropdown = document.getElementById('static-add-dropdown');
     if (dropdown && !dropdown.contains(event.target)) {
-      document.getElementById('static-add-menu').classList.remove('open');
+      closeStaticAddMenu();
     }
   });
   document.getElementById('static-save').addEventListener('click', saveStaticSchedules);
   document.getElementById('static-reload').addEventListener('click', reloadStaticSchedules);
   document.getElementById('sf-cancel').addEventListener('click', closeStaticSlotModal);
   document.getElementById('sf-submit').addEventListener('click', applyStaticSlotModal);
-  document.getElementById('static-slot-modal').addEventListener('click', (e) => {
-    if (e.target.id === 'static-slot-modal') closeStaticSlotModal();
-  });
+  bindModalOverlayClose('static-slot-modal', closeStaticSlotModal);
   document.getElementById('tf-submit').addEventListener('click', submitCreateTask);
-  document.getElementById('task-create-modal').addEventListener('click', (e) => {
-    if (e.target.id === 'task-create-modal') closeCreateTaskModal();
-  });
+  bindModalOverlayClose('task-create-modal', closeCreateTaskModal);
   window.addEventListener('beforeunload', (event) => {
     if (!state.schedules.dirty && !state.staticSchedules.dirty) return;
     event.preventDefault();

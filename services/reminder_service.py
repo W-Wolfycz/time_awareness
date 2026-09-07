@@ -129,8 +129,7 @@ class ReminderService:
         is_late: bool,
         late_minutes: int,
     ) -> TriggerResult:
-        # P0-2 隐私/身份防线：混合 @ 目标的 DueGroup 不得合并进同一 LLM prompt、
-        # ChatMemory 查询范围或 At。在产生任何 LLM/发送副作用前 fail-closed。
+        # P0-2 隐私防线：混合 @ 目标的 DueGroup 不得合并进同一 prompt/ChatMemory/At，先 fail-closed。
         at_user_id = self._resolve_target_scope(session, tasks)
         if at_user_id is None:
             logger.warning(
@@ -195,9 +194,7 @@ class ReminderService:
                 user_id=at_user_id,
             )
 
-        # 直接调用 Context.llm_generate 不会进入 AstrBot 的 on_llm_request；
-        # 动态数据因此必须由主动路径自己追加到本轮 prompt 末尾。ChatMemory takeover
-        # 已提供逐条 cm_time 时省略重复的 LAST_CHAT，但继续维护本地记录以便降级恢复。
+        # llm_generate 不走 on_llm_request，动态数据须自行追加；takeover 时省略 LAST_CHAT 但保留本地记录。
         if time_guidance_enabled:
             now = self.time_context.now()
             dynamic = self.time_context.build_dynamic(
@@ -282,6 +279,7 @@ class ReminderService:
                 calendar_config = self.config.get("calendar", {})
                 if not isinstance(calendar_config, dict):
                     calendar_config = {}
+                texts = []
                 if calendar_config.get("enable_calendar", False):
                     include_builtin = bool(self.time_context.enabled_builtin_categories())
                     events = self.time_context.calendar_store.events_for_date(
@@ -292,8 +290,6 @@ class ReminderService:
                     )
                     texts = [str(event.get("text", "")).strip() for event in events]
                     texts = [text for text in texts if text]
-                else:
-                    texts = []
                 if texts:
                     parts.append(f"今天是 {'、'.join(texts)}，可自然提一下")
                 elif self.daily_greeting_without_events():
@@ -304,26 +300,12 @@ class ReminderService:
                 else:
                     parts.append("你之前承诺过现在到点了，请按当时承诺继续")
             elif task.kind == "user":
-                if task.hint:
-                    parts.append(f"到点了，请主动提起：{task.hint}")
-                else:
-                    parts.append("到点了，请主动发一条问候/消息")
+                parts.append(f"到点了，请主动提起：{task.hint}" if task.hint else "到点了，请主动发一条问候/消息")
         return parts
 
     @staticmethod
     def _resolve_target_scope(session: str, tasks: list) -> str | None:
-        """返回到期组统一的 @ 目标身份 scope。
-
-        返回:
-            str: homogeneous scope —— 非群会话恒为 ``""``（会话本身即身份，不 At）；
-                群会话为所有个人任务（followup/user）唯一的 target_user_id
-                （全空即 ``""``，表示群公共消息不 At）。
-            None: 群会话下个人任务存在多个不同 target_user_id（含空串与具体
-                用户混合）。调用方必须 fail-closed，禁止把不同用户的个人提醒
-                合并进同一 LLM prompt / ChatMemory 范围 / At。
-
-        calendar 任务不携带个人身份，不参与 scope 判定，可与任意个人任务共存。
-        """
+        """返回到期组统一的 @ 目标 scope：群会话下多 target_user_id 时返回 None，调用方须 fail-closed。"""
         if ":GroupMessage:" not in session:
             return ""
         scopes = {

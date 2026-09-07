@@ -1,9 +1,4 @@
-"""AI 每日日程快照的隐私化持久化。
-
-快照以 ``Persona identity HMAC + 本地日期`` 为键（Person 维度隔离：同一
-Persona 的多个 Bot 共享同一份快照），不保存原始平台/Bot ID、UMO、
-Persona ID/prompt 或对话历史。写入复用插件统一的 YAML 原子替换实现。
-"""
+"""AI 每日日程快照隐私化持久化：以 Persona HMAC + 本地日期为键，不保存原始平台/Bot/Persona ID。"""
 
 from __future__ import annotations
 
@@ -37,11 +32,7 @@ class DailyScheduleSnapshotStore:
         self._failures: dict[str, dict] = {}
 
     def load(self) -> bool:
-        """加载或创建 persona secret，并读取已有快照。
-
-        快照 schema 版本不匹配时整体忽略，等待按当前 Persona、日期和时区
-        重新生成。
-        """
+        """加载或创建 persona secret 并读取快照；schema 版本不匹配时整体忽略。"""
         os.makedirs(self.data_dir, exist_ok=True)
         if not self._load_or_create_secret():
             return False
@@ -62,28 +53,12 @@ class DailyScheduleSnapshotStore:
             self._failures = {}
             return True
 
-        snapshots = data.get("snapshots", {})
-        failures = data.get("failures", {})
-        self._snapshots = (
-            {str(key): value for key, value in snapshots.items() if isinstance(value, dict)}
-            if isinstance(snapshots, dict)
-            else {}
-        )
-        self._failures = (
-            {str(key): value for key, value in failures.items() if isinstance(value, dict)}
-            if isinstance(failures, dict)
-            else {}
-        )
+        self._apply_snapshot_data(data)
         logger.info(f"{tag()} ✅ 已加载 {len(self._snapshots)} 份 AI 每日日程快照")
         return True
 
     def load_readonly(self) -> bool:
-        """只读加载快照文件：**不创建 secret、不写任何文件**。
-
-        供人格日程查看页使用——AI 日程关闭时也允许查看已有快照，
-        但不能因为查看页面而创建 secret 或新数据文件。无 secret 时
-        快照仍可枚举（persona_hash 是 key 的一部分，枚举不依赖 secret）。
-        """
+        """只读加载：不创建 secret、不写文件；无 secret 时快照仍可枚举。"""
         if self._secret is None:
             data = load_mapping(self._secret_path)
             raw = str((data or {}).get("secret", "")).strip()
@@ -104,6 +79,10 @@ class DailyScheduleSnapshotStore:
             self._snapshots = {}
             self._failures = {}
             return True
+        self._apply_snapshot_data(data)
+        return True
+
+    def _apply_snapshot_data(self, data: dict) -> None:
         snapshots = data.get("snapshots", {})
         failures = data.get("failures", {})
         self._snapshots = (
@@ -116,9 +95,6 @@ class DailyScheduleSnapshotStore:
             if isinstance(failures, dict)
             else {}
         )
-        return True
-
-    # ==================== 只读枚举（人格日程查看页） ====================
 
     def list_snapshots(self) -> list[dict]:
         """返回全部 ready 快照的深拷贝（不含失败记录）。"""
@@ -180,10 +156,7 @@ class DailyScheduleSnapshotStore:
         return self._secret
 
     def persona_hash(self, persona_id: str) -> str:
-        """将 effective Persona ID 转成不可逆的 Person 维度身份键。
-
-        同一 Persona 的多个 Bot 共享同一身份键（Person 维度隔离）。
-        """
+        """将 effective Persona ID 转为不可逆身份键；同一 Persona 多 Bot 共享。"""
         value = str(persona_id or "").strip()
         if not value:
             raise ValueError("persona_id 不能为空")
@@ -200,14 +173,15 @@ class DailyScheduleSnapshotStore:
         local_date: str | datetime.date,
         timezone: str = "",
     ) -> str:
-        """主键 = Persona + 本地日期 + 时区（v4：timezone 进入持久化 key）。
-
-        时区进入 key 后，不同时区访问同一 Persona/日期各自生成独立快照，
-        互不覆盖（此前时区只是校验字段，会在跨时区访问时反复互相覆盖）。
-        """
+        """主键=Persona+本地日期+时区；时区进入 key 使跨时区访问互不覆盖。"""
         date_text = local_date.isoformat() if isinstance(local_date, datetime.date) else str(local_date)
         tz = str(timezone or "").strip() or "system-local"
         return f"{persona_hash}:{date_text}:{tz}"
+
+    @staticmethod
+    def _get_copy(mapping: dict, key: str) -> dict | None:
+        value = mapping.get(key)
+        return copy.deepcopy(value) if isinstance(value, dict) else None
 
     def get(
         self,
@@ -215,8 +189,9 @@ class DailyScheduleSnapshotStore:
         local_date: str | datetime.date,
         timezone: str = "",
     ) -> dict | None:
-        snapshot = self._snapshots.get(self.snapshot_key(persona_hash, local_date, timezone))
-        return copy.deepcopy(snapshot) if isinstance(snapshot, dict) else None
+        return self._get_copy(
+            self._snapshots, self.snapshot_key(persona_hash, local_date, timezone)
+        )
 
     def get_failure(
         self,
@@ -224,8 +199,9 @@ class DailyScheduleSnapshotStore:
         local_date: str | datetime.date,
         timezone: str = "",
     ) -> dict | None:
-        failure = self._failures.get(self.snapshot_key(persona_hash, local_date, timezone))
-        return copy.deepcopy(failure) if isinstance(failure, dict) else None
+        return self._get_copy(
+            self._failures, self.snapshot_key(persona_hash, local_date, timezone)
+        )
 
     def save_ready(
         self,

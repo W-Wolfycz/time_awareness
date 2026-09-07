@@ -1,25 +1,4 @@
-"""
-上次对话时间追踪——自维护字典 + yaml 持久化。
-
-记录每个会话（按 ``unified_msg_origin``）的：
-
-- 用户上次发言时间（``on_llm_request`` 钩子写入，命令天然被过滤）
-- AI 上次发送时间（``after_message_sent`` 钩子写入，命令消息显式跳过）
-
-记录本身不依赖 ``chat_memory``。当 ChatMemory 已对某轮请求实际执行上下文接管时，
-注入层会省略重复的 ``<LAST_CHAT>``；本追踪器仍继续记录，便于接管关闭或不可用时
-立即恢复时间间隔感知。
-
-数据结构（持久化到 ``last_chat_times.yaml``）::
-
-    sessions:
-      "aiocqhttp:GroupMessage:10001":
-        user: "2026-07-08T14:30:21+08:00"
-        ai:  "2026-07-08T14:30:45+08:00"
-
-``record_*`` 只更新内存，并通过短防抖任务合并写盘；插件 ``terminate`` 时强制
-flush，避免每轮用户/AI 消息都同步阻塞事件循环。
-"""
+"""上次对话时间追踪：自维护字典 + yaml；record_* 只更新内存并经短防抖合并写盘。"""
 
 import asyncio
 import datetime
@@ -27,8 +6,7 @@ import datetime
 from ._datafile import atomic_write_yaml, load_mapping
 from ..log import logger, tag
 
-# 上次对话记录保留期：超过 30 天未活跃的会话在 load/flush 时清理，
-# 避免 last_chat_times.yaml 与内存无限增长。
+# 保留期：超 30 天未活跃会话在 load/flush 时清理，避免无限增长
 _RETENTION_DAYS = 30
 
 
@@ -141,11 +119,7 @@ class LastChatTracker:
         self._schedule_flush()
 
     def summary(self, umo: str, now: datetime.datetime) -> str:
-        """返回相对时间摘要，如「用户 5 分钟前 · AI 3 分钟前」。
-
-        全无记录返回空串（调用方据此省略 ``<LAST_CHAT>`` 标签）；
-        仅一边有记录只显示一边。
-        """
+        """相对时间摘要（如「用户 5 分钟前 · AI 3 分钟前」）；无记录返回空串。"""
         entry = self._sessions.get(umo)
         if not entry:
             return ""

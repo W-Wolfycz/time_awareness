@@ -1,9 +1,4 @@
-"""AI 每日日程生成、幂等、回退与运行时解析服务。
-
-隔离维度为 Person：快照以 effective Persona 的 HMAC 身份为键，同一
-Persona 的多个 Bot 共享同一份冻结日程；切换 Persona 后立即切换到对应
-快照。Persona 视为必备身份——解析失败时不创建快照。
-"""
+"""AI 每日日程生成、幂等、回退与运行时解析服务（以 Persona 为隔离维度）。"""
 
 from __future__ import annotations
 
@@ -18,10 +13,12 @@ from typing import Any, Awaitable, Callable
 from ..domain.schedule import (
     MINUTES_PER_DAY,
     ScheduleValidationError,
+    ai_daily_config,
+    ai_priority_over_static,
     find_active_daily_slot,
     format_time,
-    normalize_static_slots,
     parse_time,
+    static_slots_from_config,
 )
 from ..domain.timeline import (
     advance_executed,
@@ -66,11 +63,7 @@ class GenerationResult:
 
 @dataclass(frozen=True)
 class FrozenIdentity:
-    """排队时刻冻结的生成上下文：任务执行不再重新解析身份。
-
-    避免「排队时 Persona A → 执行时切换到 B → 任务挂 A 的 key 却写 B 的
-    快照」竞态；也保证重试全程使用同一身份与时刻。
-    """
+    """排队时刻冻结的生成上下文（身份/时区/日期），避免执行时 Persona 切换竞态。"""
 
     session: str
     persona_hash: str
@@ -115,13 +108,11 @@ class DailyScheduleService:
         self._sleep = sleep
         self._weather_forecast_provider = weather_forecast_provider
         self._available = True
-        # 进程内身份缓存：session → (persona_hash, persona 对象)
-        # （原始 UMO 与 Persona prompt 不落盘，只在内存）
+        # 进程内身份缓存：session → (persona_hash, persona, persona_id)；原始 UMO/prompt 不落盘
         self._persona_cache: dict[str, tuple[str, Any, str]] = {}
         # 代表会话表：persona_hash → session（多 Bot 同 persona 时共享同一份快照）
         self._representative_sessions: dict[str, str] = {}
-        # UMO 最后活跃时间（2.0.0 计划 §3.3 保活：一整天未再出现的 UMO 从
-        # 集合中删除；仅进程内存，不持久化）
+        # UMO 最后活跃时间（保活：一整天未出现的 UMO 删除；仅进程内存）
         self._session_active_at: dict[str, datetime.datetime] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: dict[str, asyncio.Task] = {}
@@ -138,16 +129,18 @@ class DailyScheduleService:
         self._available = bool(self.store.load())
         return self._available
 
+    def _daily_schedule_config(self) -> dict:
+        """daily_schedule 配置块；非 dict 时回退空 dict。"""
+        daily = self.config.get("daily_schedule", {}) if isinstance(self.config, dict) else {}
+        return daily if isinstance(daily, dict) else {}
+
     def _daily_config(self) -> dict:
-        daily_schedule = self.config.get("daily_schedule", {})
-        value = daily_schedule.get("ai_daily", {}) if isinstance(daily_schedule, dict) else {}
-        return value if isinstance(value, dict) else {}
+        return ai_daily_config(self.config)
 
     def configured_enabled(self) -> bool:
-        daily_schedule = self.config.get("daily_schedule", {})
+        daily_schedule = self._daily_schedule_config()
         return bool(
-            isinstance(daily_schedule, dict)
-            and daily_schedule.get("enable_schedule", False)
+            daily_schedule.get("enable_schedule", False)
             and self._daily_config().get("enabled", False)
         )
 
@@ -165,11 +158,7 @@ class DailyScheduleService:
         return max(1, min(365, value))
 
     def state_retention_days(self) -> int:
-        """全局运行期状态保留期（天）：顶层 ``runtime.state_retention_days``。
-
-        只用于回收进程内的未占用日期锁等运行期状态，与 AI 快照文件自身的
-        ``daily_schedule.ai_daily.retention_days`` 无关；缺省/非法回退 7。
-        """
+        """全局运行期状态保留期（天）；缺省/非法回退 7，与 AI 快照文件自身 retention_days 无关。"""
         runtime = self.config.get("runtime", {})
         raw_value = (
             runtime.get("state_retention_days", 7)
@@ -185,12 +174,7 @@ class DailyScheduleService:
         return max(1, min(365, value))
 
     def _cleanup_stale_locks(self) -> int:
-        """回收已过期、未锁定的日程生成锁，防止 ``_locks`` 无界增长。
-
-        只删除日期早于 state_retention_days、且当前未被持有的锁；活动任务
-        （正在生成/持锁）的锁一律保留。锁键为
-        ``persona_hash:YYYY-MM-DD:tz``，日期固定在第 2 段。
-        """
+        """回收已过期、未锁定的日程生成锁，防止 ``_locks`` 无界增长；活动锁一律保留。"""
         now = self.time_context.now()
         threshold = now.date() - datetime.timedelta(days=self.state_retention_days())
         stale: list[str] = []
@@ -235,15 +219,7 @@ class DailyScheduleService:
 
     @classmethod
     def _timezone_key(cls, now: datetime.datetime) -> str:
-        """时区主键片段（后端存储用，必须可靠）。
-
-        - ZoneInfo/IANA：直接返回 IANA key（如 ``Asia/Shanghai``），可靠且可被
-          Intl.DateTimeFormat 直接使用。
-        - 固定 offset（无 IANA）：归一化为 ``UTC±HH:MM``（如 ``UTC+08:00``），
-          这是稳定回退键——前端据此识别为固定偏移，不把它当 IANA 传给 Intl。
-        - naive/系统时区不可知或无法归类：回退 ``system-local``，前端按浏览器
-          本地处理。绝不把 ``CST`` 之类歧义缩写当 IANA 存储。
-        """
+        """时区主键片段：IANA 直接返回，固定 offset 归一化为 UTC±HH:MM，无法归类回退 system-local。"""
         if now.tzinfo is not None:
             name = str(now.tzinfo)
         else:
@@ -256,8 +232,7 @@ class DailyScheduleService:
         normalized = cls._normalize_fixed_offset(name)
         if normalized is not None:
             return normalized
-        # 其余情况：仅当能被 zoneinfo 解析为 IANA 时保留（ZoneInfo.str 本身
-        # 就是 IANA key）；否则一律落到稳定回退键 system-local。
+        # 仅当能被 zoneinfo 解析为 IANA 时保留，否则落到 system-local。
         if name and name != "system-local":
             try:
                 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -274,12 +249,7 @@ class DailyScheduleService:
         session: str,
         event: Any = None,
     ) -> tuple[str, Any | None]:
-        """解析当前 effective Persona（一次解析同时产出身份与 prompt 对象）。
-
-        与 LLM 实际请求同源：session 强制规则 → conversation persona →
-        provider 默认 persona。返回 ``(resolved_id, persona)``；解析失败或为
-        无 Persona 时返回 ``("", None)``（不创建无 Persona 身份）。
-        """
+        """解析当前 effective Persona，返回 ``(resolved_id, persona)``；失败返回 ``("", None)``。"""
         try:
             return await self._persona_resolver(self.context, session, event)
         except Exception as exc:
@@ -304,12 +274,22 @@ class DailyScheduleService:
         cached = self._persona_cache.get(str(session or "").strip())
         return cached[1] if cached else None
 
-    def register_session(self, session: str, *, trigger: bool = True) -> str:
-        """同步注册代表会话（仅使用已缓存的 Persona 身份）。
+    async def resolve_session_persona_name(
+        self,
+        session: str,
+        *,
+        event: Any = None,
+    ) -> str:
+        """直接解析当前会话生效的 Persona 显示名（不走缓存）；失败返回空串。"""
+        resolved_id, persona = await self._resolve_persona(session, event)
+        if isinstance(persona, dict):
+            name = str(persona.get("name", "") or "").strip()
+        else:
+            name = str(getattr(persona, "name", "") or "").strip()
+        return name or str(resolved_id or "").strip()
 
-        身份需先经 ``register_session_async`` 解析；未缓存时返回空串，不阻塞
-        当前路径（首次消息异步补生成会触发解析）。
-        """
+    def register_session(self, session: str, *, trigger: bool = True) -> str:
+        """同步注册代表会话（仅用已缓存身份）；未缓存返回空串，不阻塞。"""
         if not self.enabled():
             return ""
         session = str(session or "").strip()
@@ -330,16 +310,7 @@ class DailyScheduleService:
         event: Any = None,
         touch_active: bool = True,
     ) -> str:
-        """异步注册代表会话：解析 effective Persona 并缓存身份。
-
-        每次调用都会重新解析——Persona 切换（会话规则 / conversation /
-        默认人设任一变化）后立即刷新身份缓存，下一轮消息即使用新快照；
-        解析为空时清除旧缓存，避免把旧 Persona 的日程注入新状态。
-
-        ``touch_active=False`` 用于每日生成扫描（2.0.0 计划 §3.3）：扫描
-        只是轮询检查点，不算 UMO「再次出现」，不刷新保活时间戳，否则
-        集合会因每日扫描而永不过期。
-        """
+        """异步注册代表会话：重新解析并缓存身份；touch_active=False 用于每日扫描（不刷新保活）。"""
         if not self.enabled():
             return ""
         session = str(session or "").strip()
@@ -371,11 +342,7 @@ class DailyScheduleService:
         self._session_active_at[session] = now or self.time_context.now()
 
     def _expire_stale_sessions(self, now: datetime.datetime) -> None:
-        """删除连续一整天未再出现的 UMO（2.0.0 计划 §3.3）。
-
-        仅从进程内集合（身份缓存/代表会话/活跃时间）移除；不删除 Persona
-        快照、日历或提醒数据。重启后集合重新建立，等待 UMO 再次出现。
-        """
+        """删除一整天未活跃的 UMO；仅清进程内集合，不删快照/日历/提醒数据。"""
         threshold = now - datetime.timedelta(days=1)
         stale = [
             session
@@ -410,11 +377,7 @@ class DailyScheduleService:
         now: datetime.datetime,
         persona_hash: str,
     ) -> bool:
-        """2.0.0 分层模型：status=ready 即可复用，不要求任何来源层非空。
-
-        合法空 AI 日程（``ai_slots=[]``）是有效业务结果：不得触发重复生成
-        或失败记录；``slots`` 只是可重建缓存，不作为可用性判断依据。
-        """
+        """status=ready 即可复用；合法空 AI 日程是有效结果，不触发重复生成。"""
         return bool(
             isinstance(snapshot, dict)
             and snapshot.get("status") == "ready"
@@ -425,14 +388,7 @@ class DailyScheduleService:
         )
 
     def _render_snapshot(self, snapshot: dict, now: datetime.datetime) -> list[dict]:
-        """动态渲染快照的有效时间线（本地计算，不写盘）。
-
-        运行时边界 = 当前时刻的分钟（非 UI 权限的下一整分钟）：当前时刻
-        之前的时段按已生效展示（命中判定不受秒数影响），之后按来源层动态
-        合并。冻结边界整天不自动写盘推进，因此渲染前先把 executed_until
-        动态推进到当前时刻（用快照旧 static 副本，只读不写盘），使已过去
-        的时段与未来层连续展示，避免 [executed_until, now) 空白。
-        """
+        """动态渲染快照有效时间线（只读）：边界=当前分钟，渲染前把 executed_until 推进到 now。"""
         current_static = self._current_static_slots()
         ai_priority = self._ai_priority_over_static()
         now_minute = day_minute_of(now)
@@ -450,12 +406,7 @@ class DailyScheduleService:
         return merge_active_slot_fragments(rendered, now_minute)
 
     def _render_full_day(self, snapshot: dict) -> list[dict]:
-        """渲染快照的完整全天时间线（只读，不写盘）。
-
-        先把各来源层推进至日末（历史推进用快照旧 static_slots 副本），
-        再按当前优先级渲染——结果即「该日实际发生/计划的完整时间线」，
-        供最近日程反重复与昨日状态消费。
-        """
+        """渲染快照完整全天时间线（只读）：推进至日末后按当前优先级渲染。"""
         ai_priority = self._ai_priority_over_static()
         old_static = snapshot.get("static_slots", [])
         advanced = advance_executed(
@@ -466,36 +417,10 @@ class DailyScheduleService:
         )
 
     def _ai_priority_over_static(self) -> bool:
-        daily = self.config.get("daily_schedule", {})
-        ai_daily = daily.get("ai_daily", {}) if isinstance(daily, dict) else {}
-        return bool(ai_daily.get("ai_priority_over_static", False))
+        return ai_priority_over_static(self.config)
 
     def _current_static_slots(self) -> list[dict]:
-        daily = self.config.get("daily_schedule", {})
-        value = daily.get("schedule_templates") if isinstance(daily, dict) else None
-        result = []
-        for item in value if isinstance(value, list) else []:
-            if not isinstance(item, dict):
-                continue
-            result.append(
-                {
-                    "name": str(item.get("name", "") or ""),
-                    "start": str(item.get("start_time", "") or ""),
-                    "end": str(item.get("end_time", "") or ""),
-                    "state": str(item.get("state_prompt", "") or ""),
-                    "origin": "static",
-                }
-            )
-        # 快照层只保存非跨日的规范化片段；读取旧快照时 timeline 仍会再次
-        # 规范化，因此该存储边界变更保持向后兼容。
-        return [
-            {
-                key: item[key]
-                for key in ("name", "start", "end", "state", "origin")
-                if key in item
-            }
-            for item in normalize_static_slots(result)
-        ]
+        return static_slots_from_config(self.config)
 
     def get_snapshot_for_session(self, session: str, *, now=None) -> dict | None:
         if not self.enabled():
@@ -515,6 +440,43 @@ class DailyScheduleService:
             if persona_hash
             else None
         )
+
+    def today_schedule_summary(self, session: str, *, now=None) -> str | None:
+        """今日全天安排摘要（每段 HH:MM-HH:MM 名称）；无内容返回 None。"""
+        if not self.enabled() and not self._has_static_templates():
+            return None
+        now = now or self.time_context.now()
+        snapshot = self.get_snapshot_for_session(session, now=now)
+        slots = self._render_snapshot(snapshot, now) if snapshot else self._static_summary_slots()
+        if not slots:
+            return None
+        lines = []
+        for slot in slots:
+            if not isinstance(slot, dict):
+                continue
+            start = str(slot.get("start", "") or "").strip()
+            end = str(slot.get("end", "") or "").strip()
+            name = str(slot.get("name", "") or "").strip()[:24]
+            if not start or not end:
+                continue
+            lines.append(f"{start}-{end} {name}" if name else f"{start}-{end}")
+        return " | ".join(lines) or None
+
+    def _has_static_templates(self) -> bool:
+        templates = self._daily_schedule_config().get("schedule_templates")
+        return bool(isinstance(templates, list) and templates)
+
+    def _static_summary_slots(self) -> list[dict]:
+        templates = self._daily_schedule_config().get("schedule_templates")
+        return [
+            {
+                "start": str(s.get("start_time", "") or ""),
+                "end": str(s.get("end_time", "") or ""),
+                "name": str(s.get("name", "") or ""),
+            }
+            for s in templates
+            if isinstance(s, dict)
+        ]
 
     def resolve(self, *, now: datetime.datetime, session: str) -> ScheduleResolution | None:
         """同步解析当前有效时间线；缺失或无效时由调用方使用静态日程。"""
@@ -556,17 +518,7 @@ class DailyScheduleService:
         force: bool = False,
         target_date: datetime.date | None = None,
     ) -> bool:
-        """非阻塞提交生成；同一 persona/date 保持一个活动任务。
-
-        排队时刻冻结完整身份上下文（``FrozenIdentity``）：任务执行与重试
-        全程使用冻结的身份/时区/日期，切换 Persona 不会让 A 的任务去写 B
-        的快照。
-
-        日级熔断：本日该 Persona/日期/时区已存在持久化终态 failure 时，
-        自动生成被抑制（普通消息再次进来不再重新排队），避免持续 Provider/
-        LLM 失败时的调用风暴；``force=True``（手动 regenerate）可绕过。
-        成功快照就绪后 ``save_ready`` 会清除 failure，熔断随之解除。
-        """
+        """非阻塞提交生成；同一 persona/date 一个活动任务；日级熔断时自动生成被抑制，force 可绕过。"""
         if not self.enabled():
             logger.debug(f"{tag()} 跳过排队：AI 每日日程未启用")
             return False
@@ -576,8 +528,7 @@ class DailyScheduleService:
             logger.debug(f"{tag()} 跳过排队：Persona 未解析（空身份） session={session}")
             return False
         persona = self._identity_object_for(session)
-        # 注意：排队本身不是 UMO「出现」，不刷新保活时间戳（活跃时间
-        # 只由 register 路径刷新，否则每日扫描排队会让集合永不过期）
+        # 排队不是 UMO「出现」，不刷新保活时间戳（只由 register 路径刷新）。
         self._representative_sessions[persona_hash] = session
         now = self.time_context.now()
         local_date = target_date or now.date()
@@ -590,8 +541,7 @@ class DailyScheduleService:
                 f"persona={self._identity_id_for(session)} date={local_date.isoformat()}"
             )
             return False
-        # 日级熔断：本日已有持久化终态 failure → 抑制自动生成（调用风暴防护）。
-        # 先判快照可用再判 failure：同 key 同时存在 usable 快照时以快照为准。
+        # 日级熔断：已有终态 failure 时抑制自动生成；先判快照可用再判 failure。
         if not force and self.store.get_failure(persona_hash, local_date, timezone):
             logger.debug(
                 f"{tag()} 跳过排队：本日已熔断（存在终态 failure） "
@@ -643,15 +593,9 @@ class DailyScheduleService:
         *,
         target_date: datetime.date | None = None,
     ) -> int:
-        """每日生成扫描（2.0.0 计划 §3.2/§3.3）。
-
-        先回收一整天未活跃的 UMO，再对仍保活的 UMO 集合**逐一重新解析**
-        effective Persona，按解析后的身份去重，每个 Persona 只排队一次
-        生成（解析失败/为空的本轮不生成）。
-        """
+        """每日生成扫描：回收不活跃 UMO 后逐一重新解析 Persona 并去重排队。"""
         self._expire_stale_sessions(self.time_context.now())
-        # _session_active_at 是完整保活 UMO 集合（代表会话表只保留每 Persona 一个）
-        # touch_active=False：扫描不是 UMO「再次出现」，不刷新保活时间戳
+        # _session_active_at 是完整保活集合；touch_active=False：扫描不刷新保活时间戳
         sessions = list(self._session_active_at)
         personas: dict[str, str] = {}  # persona_hash → 代表会话
         for session in sessions:
@@ -676,12 +620,7 @@ class DailyScheduleService:
         *,
         force: bool,
     ) -> GenerationResult:
-        """后台生成任务：使用冻结身份执行。
-
-        2.0.0 起重试权下移：Step1（角色状态评估）与 Step2（日程规划）的
-        失败都由 generation 内部按 0/5/30s 各自重试（上限 max_attempts）；
-        此处不再整体重试，避免 Step2 失败导致 Step1 被重复调用。
-        """
+        """后台生成任务：使用冻结身份执行；重试已下移到 generation 内部。"""
         return await self.generate_for_session(frozen=frozen, force=force)
 
     async def generate_for_session(
@@ -693,12 +632,7 @@ class DailyScheduleService:
         event: Any = None,
         frozen: FrozenIdentity | None = None,
     ) -> GenerationResult:
-        """为当前 Persona 生成当天快照；失败不覆盖旧快照。
-
-        ``frozen`` 由后台任务传入（排队时刻冻结的身份/时区/日期）；交互路径
-        （命令）传入 None，此时每次重新解析 Persona——一次解析同时得到身份
-        与 prompt 对象，保证快照归属与注入内容同源。
-        """
+        """为当前 Persona 生成当天快照；frozen 由后台任务传入，否则每次重新解析 Persona。"""
         if not self.enabled():
             return GenerationResult(
                 False,
@@ -715,7 +649,6 @@ class DailyScheduleService:
             local_date = frozen.local_date
             timezone = frozen.timezone
             now = self._context_now_for_date(actual_now, local_date)
-            # 日志诊断用：真实 Persona ID 优先，缺失时回退完整 hash
             persona_label = frozen.persona_id or persona_hash
         else:
             # 每次生成前重新解析 Persona：切换后立即对应到新身份
@@ -788,8 +721,7 @@ class DailyScheduleService:
                     if actual_now.tzinfo is not None
                     else actual_now.astimezone()
                 )
-                # 提前生成次日日程时从 00:00 保留完整规划；当天补生成仍冻结
-                # 已经过的分钟，不能让未来预生成时间误裁掉目标日的大部分时段。
+                # 次日预生成从 00:00 保留完整规划；当天补生成仍冻结已过去分钟。
                 cutoff = (
                     next_minute_cutoff(actual_now)
                     if local_date == actual_now.date()
@@ -956,12 +888,7 @@ class DailyScheduleService:
         policy: AdaptiveGenerationPolicy,
         now: datetime.datetime,
     ) -> tuple[str, tuple[dict, ...]]:
-        """提取最近 N 天快照的压缩摘要（时段边界 + 名称 + 状态指纹）。
-
-        同一 Persona、同一时区的最近快照，不含任何身份信息；同时返回动态
-        渲染后的时间线供反重复/相似度消费（2.0.0 计划 §2.2：相似度计算不走
-        ``slots`` 缓存，统一由渲染入口重建）。裁剪由总预算统一处理。
-        """
+        """提取最近 N 天快照压缩摘要；同时返回动态渲染时间线供反重复消费。"""
         date = now.date()
         timezone = self._timezone_key(now)
         snapshots: list[dict] = []
@@ -991,8 +918,7 @@ class DailyScheduleService:
                 if isinstance(slot, dict)
             ]
             entries.append({"date": str(snapshot.get("local_date", "")), "slots": slots})
-            # 反重复/相似度消费的动态时间线（含用户修改后的实际生效版本）；
-            # 携带 boundary_state/local_date 供 Step1 最近主题反重复提取。
+            # 反重复消费的动态时间线（含用户修改后的生效版本），携带 boundary_state/local_date。
             rendered_snapshots.append(
                 {
                     "slots": rendered,
@@ -1013,22 +939,7 @@ class DailyScheduleService:
         finalize_previous: bool = True,
         window_days: int = 7,
     ) -> dict | None:
-        """回溯最近一次可用角色状态，并携带自该边界日起到昨天为止的实际时间线。
-
-        供 Step1 边界评估使用：前一个可用 boundary + 连续实际日程 →
-        当日初始角色状态。前日状态推导统一由动态渲染入口重建（2.0.0
-        计划 §2.2，不读 ``slots`` 缓存）。
-
-        - 逐天回溯（窗口 ``window_days``，缺省 7、由 recent_days 覆盖）找到
-          最近一个 ``status=ready`` 且 ``boundary_state`` 非空的快照 D；
-        - 窗口内找不到（断链超过窗口 / 全新开始）→ 空边界分支：boundary 为空，
-          但仍携带窗口内每天的实际时间线（对 Step1 推导仍有因果价值）；
-        - 某天没有 ready 快照（AI 缺失/生成失败）→ 该天实际时间线 = 静态日程；
-          实际跑了什么就参考什么，不为失败的天虚构 AI 日程；
-        - 有快照且日末尚未推进到 24:00 时，先按该日采用的来源层（旧
-          static_slots 副本）补齐至日末；``finalize_previous=True`` 时固化写盘，
-          前一天预生成次日时只使用计划视图，不提前冻结尚未真正发生的时间。
-        """
+        """回溯最近可用角色状态及其边界日起的实际时间线；窗口内无边界走空边界分支。"""
         timezone = self._timezone_key(now)
         window_days = max(1, min(365, int(window_days or 7)))
         days = [
@@ -1041,19 +952,16 @@ class DailyScheduleService:
             slots = snap.get("slots")
             if not isinstance(slots, list):
                 return []
-            result = []
-            for slot in slots[: self.generation.max_slots()]:
-                if not isinstance(slot, dict):
-                    continue
-                result.append(
-                    {
-                        "name": str(slot.get("name", "") or "")[:24],
-                        "start": str(slot.get("start", "") or "")[:5],
-                        "end": str(slot.get("end", "") or "")[:5],
-                        "state": " ".join(str(slot.get("state", "") or "").split())[:MAX_STATE_LENGTH],
-                    }
-                )
-            return result
+            return [
+                {
+                    "name": str(slot.get("name", "") or "")[:24],
+                    "start": str(slot.get("start", "") or "")[:5],
+                    "end": str(slot.get("end", "") or "")[:5],
+                    "state": " ".join(str(slot.get("state", "") or "").split())[:MAX_STATE_LENGTH],
+                }
+                for slot in slots[: self.generation.max_slots()]
+                if isinstance(slot, dict)
+            ]
 
         rendered: list[tuple[datetime.date, list[dict], dict]] = []
         for day in days:
@@ -1061,8 +969,7 @@ class DailyScheduleService:
             boundary: dict = {}
             if isinstance(snapshot, dict) and snapshot.get("status") == "ready":
                 if str(snapshot.get("executed_until", "")) != "24:00":
-                    # 日末尚未推进：用该日旧 static_slots 补齐至日末，
-                    # 不得用最新静态配置反写历史。
+                    # 日末未推进：用该日旧 static_slots 补齐，不得用最新静态配置反写历史。
                     ai_priority = self._ai_priority_over_static()
                     old_static = snapshot.get("static_slots", [])
                     advanced = advance_executed(
@@ -1096,8 +1003,7 @@ class DailyScheduleService:
             ),
             None,
         )
-        # 自边界日起（含边界日当天）携带实际时间线，按日期升序（D → 昨天）；
-        # 空边界分支携带整个窗口（T-window → 昨天）
+        # 自边界日起按日期升序携带实际时间线；空边界分支携带整个窗口。
         if anchor_index is not None:
             selected = reversed(rendered[: anchor_index + 1])
         else:
@@ -1176,7 +1082,6 @@ class DailyScheduleService:
                     retention_days=self.retention_days(),
                     today=current.date(),
                 )
-                # 回收过期未占用的日期生成锁（仅内存运行期状态）
                 self._cleanup_stale_locks()
                 target_date = current.date() + datetime.timedelta(
                     days=target_day_offset

@@ -1,27 +1,4 @@
-"""
-内置现实日历事件生成器
-
-按 5 个分类生成常用的现实日历事件：
-
-- ``legal_holiday``：法定节假日（含调休），数据源 ``chinese_calendar`` 库
-- ``traditional``：传统农历节日（元宵、七夕、重阳、腊八、除夕等）
-- ``political``：政治纪念日（建党、建军、抗战胜利等，固定公历）
-- ``international``：国际/西方节日（情人节、圣诞节、母亲节、复活节等）
-- ``solar_term``：二十四节气
-
-设计要点：
-
-- **跨年再生稳定 ID**：每条事件 ID 为 ``builtin:{category}:{MM-DD}:{text}``，
-  同一年内唯一，跨 regen 稳定，便于黑名单按 ID 记录。
-- **正日子 vs 假期**：法定节假日的正日子当天显示 ``X 节``，相邻调休日显示
-  ``X 节假期``。归属判定直接用 ``chinese_calendar.get_holiday_detail`` 返回的
-  ``holiday_name``（连休场景下「先休后过节」也能正确归属）。
-- **节气跨年问题**：``Lunar.getJieQiTable`` 返回的表可能跨公历年（农历年跨公历），
-  本模块改用 ``Solar.getLunar().getJieQi()`` 逐日判定，只取当年节气。
-- **黄历已迁移**：v1.7.0 起，黄历（每日干支/宜忌）从本模块剥离到独立的
-  ``core/almanac_sensor.py``，走 ``<ALMANAC_STATE>`` 独立标签——避免一年 365 条
-  占用 ``builtin_events.yaml`` 并混入 ``<TODAY_EVENTS>`` 让 LLM 误以为今天"事件很多"。
-"""
+"""内置现实日历事件生成器：5 分类；ID=builtin:cat:MM-DD:text 跨 regen 稳定；节气用逐日判定避免跨年混淆。"""
 
 import datetime
 from typing import Optional
@@ -30,27 +7,13 @@ from ..log import logger, tag
 
 
 
-# ==================== 类目常量 ====================
-
 CATEGORY_LEGAL = "legal_holiday"
 CATEGORY_TRADITIONAL = "traditional"
 CATEGORY_POLITICAL = "political"
 CATEGORY_INTERNATIONAL = "international"
 CATEGORY_SOLAR_TERM = "solar_term"
 
-ALL_CATEGORIES = (
-    CATEGORY_LEGAL,
-    CATEGORY_TRADITIONAL,
-    CATEGORY_POLITICAL,
-    CATEGORY_INTERNATIONAL,
-    CATEGORY_SOLAR_TERM,
-)
-
-
-# ==================== 事件清单 ====================
-
-# 法定节假日英文名 → 中文名
-# chinese_calendar 库返回的 holiday_name 是英文
+# chinese_calendar 返回英文 holiday_name → 中文名
 LEGAL_NAME_CN = {
     "New Year's Day": "元旦",
     "Spring Festival": "春节",
@@ -76,7 +39,6 @@ TRADITIONAL_LUNAR = [
     ("南方小年", 12, 24),
 ]
 
-# 政治纪念日（公历）
 POLITICAL_DATES = [
     ("植树节", 3, 12),
     ("五四青年节", 5, 4),
@@ -88,7 +50,6 @@ POLITICAL_DATES = [
     ("国家公祭日", 12, 13),
 ]
 
-# 国际/西方节日（固定公历日期）
 INTERNATIONAL_FIXED = [
     ("情人节", 2, 14),
     ("国际妇女节", 3, 8),
@@ -100,7 +61,6 @@ INTERNATIONAL_FIXED = [
     ("圣诞节", 12, 25),
 ]
 
-# 国际/西方节日（按月第 N 个周X）
 # (名称, 月, 周几, 第几个)
 INTERNATIONAL_COMPUTED = [
     ("母亲节", 5, "Sunday", 2),
@@ -108,7 +68,6 @@ INTERNATIONAL_COMPUTED = [
     ("感恩节", 11, "Thursday", 4),
 ]
 
-# 二十四节气
 SOLAR_TERMS = [
     "立春", "雨水", "惊蛰", "春分", "清明", "谷雨",
     "立夏", "小满", "芒种", "夏至", "小暑", "大暑",
@@ -117,13 +76,8 @@ SOLAR_TERMS = [
 ]
 
 
-# ==================== 工具函数 ====================
-
 def _make_event(year: int, month: int, day: int, text: str, category: str) -> dict:
-    """构造 builtin 事件 dict。
-
-    ID 跨 regen 稳定（同年同 category+月日+文本一致），便于黑名单按 ID 记录。
-    """
+    """构造 builtin 事件；ID 跨 regen 稳定，便于黑名单按 ID 记录。"""
     return {
         "id": f"builtin:{category}:{month:02d}-{day:02d}:{text}",
         "category": category,
@@ -136,10 +90,7 @@ def _make_event(year: int, month: int, day: int, text: str, category: str) -> di
 
 
 def _lunar_to_solar(year: int, lunar_month: int, lunar_day: int, *, silent: bool = False) -> Optional[datetime.date]:
-    """农历转公历（非闰月）。失败返回 None。
-
-    silent=True 用于「探索性调用」（如除夕先试 30 再试 29），失败是预期路径，不打 warning。
-    """
+    """农历转公历（非闰月）；失败返回 None；silent=True 用于探索性调用不打 warning。"""
     try:
         from lunar_python import Lunar
         lunar = Lunar.fromYmd(year, lunar_month, lunar_day)
@@ -152,10 +103,7 @@ def _lunar_to_solar(year: int, lunar_month: int, lunar_day: int, *, silent: bool
 
 
 def _nth_weekday_of_month(year: int, month: int, weekday_name: str, n: int) -> datetime.date:
-    """计算 year 年 month 月第 n 个 weekday_name 的日期。
-
-    weekday_name: "Monday".."Sunday"。n 从 1 开始。
-    """
+    """计算第 n 个 weekday_name（Monday..Sunday，n 从 1 起）的日期。"""
     weekdays = {
         "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
         "Friday": 4, "Saturday": 5, "Sunday": 6,
@@ -169,10 +117,7 @@ def _nth_weekday_of_month(year: int, month: int, weekday_name: str, n: int) -> d
 
 
 def _gauss_easter(year: int) -> datetime.date:
-    """高斯算法计算复活节（西方教会）。
-
-    返回公历日期。适用于 1583 年之后的年份。
-    """
+    """高斯算法计算复活节（西方教会，公历，1583 年后有效）。"""
     a = year % 19
     b = year // 100
     c = year % 100
@@ -190,26 +135,14 @@ def _gauss_easter(year: int) -> datetime.date:
     return datetime.date(year, month, day)
 
 
-# ==================== 分类生成器 ====================
-
 def gen_legal_holidays(year: int) -> list:
-    """生成法定节假日事件（含调休）。
-
-    遍历整年，对每个 ``chinese_calendar`` 判定为 holiday 的日期，根据
-    ``holiday_name`` 区分：
-    - 正日子（如国庆 10/1、中秋 农历8/15）→ ``X 节``
-    - 非正日子但属于该节日调休 → ``X 节假期``
-
-    春节正日子为农历正月初一至初三（共 3 天）；国庆正日子为 10/1-10/3。
-    其他节日正日子单天。中秋/端午按农历算，清明按节气算。
-    """
+    """生成法定节假日（含调休）；正日子为 X 节、调休日为 X 节假期。"""
     try:
         import chinese_calendar as cc
     except ImportError:
         logger.warning(f"{tag()} ⚠️ chinese_calendar 库未安装，跳过法定节假日生成")
         return []
 
-    # 计算各节日正日子
     sf_first = _lunar_to_solar(year, 1, 1)
     sf_second = _lunar_to_solar(year, 1, 2)
     sf_third = _lunar_to_solar(year, 1, 3)
@@ -254,12 +187,7 @@ def gen_legal_holidays(year: int) -> list:
 
 
 def gen_traditional(year: int) -> list:
-    """生成传统农历节日事件（公历落在 year 年的）。
-
-    农历腊月（12 月）的节日公历通常落到下一年的 1-2 月，要拿「公历 year 年」
-    的腊八/小年/除夕，需要取「农历 year-1 年」的腊月。本函数同时尝试农历
-    year 与 year-1 两个年份，取公历年份匹配 year 的。
-    """
+    """生成传统农历节日；腊月节日公历落到下一年，故同时尝试农历 year 与 year-1。"""
     events = []
     for text, lm, ld in TRADITIONAL_LUNAR:
         for lunar_year in (year, year - 1):
@@ -278,7 +206,7 @@ def gen_traditional(year: int) -> list:
                 break
         else:
             continue
-        break  # 找到一个就停
+        break
     return events
 
 
@@ -298,7 +226,6 @@ def gen_international(year: int) -> list:
     for text, m, weekday, n in INTERNATIONAL_COMPUTED:
         d = _nth_weekday_of_month(year, m, weekday, n)
         events.append(_make_event(year, d.month, d.day, text, CATEGORY_INTERNATIONAL))
-    # 复活节
     try:
         easter = _gauss_easter(year)
         events.append(_make_event(year, easter.month, easter.day, "复活节", CATEGORY_INTERNATIONAL))
@@ -308,11 +235,7 @@ def gen_international(year: int) -> list:
 
 
 def gen_solar_terms(year: int) -> list:
-    """生成年内二十四节气事件。
-
-    用 ``Solar.getLunar().getJieQi()`` 逐日判定，避免 ``getJieQiTable`` 的跨年混淆。
-    每年 365 天循环开销小，可接受。
-    """
+    """生成年内二十四节气；逐日判定避免 getJieQiTable 跨年混淆。"""
     try:
         from lunar_python import Solar
     except ImportError:
@@ -350,9 +273,6 @@ def _find_solar_term_date(year: int, term_name: str) -> list:
     return dates
 
 
-# ==================== 总入口 ====================
-
-# 分类 → 生成函数
 _GENERATORS = {
     CATEGORY_LEGAL: gen_legal_holidays,
     CATEGORY_TRADITIONAL: gen_traditional,
@@ -363,15 +283,7 @@ _GENERATORS = {
 
 
 def generate_for_year(year: int, enabled_categories: list) -> list:
-    """生成指定年份、指定分类的内置事件列表。
-
-    Args:
-        year: 公历年份
-        enabled_categories: 启用的分类列表（来自配置开关）
-
-    Returns:
-        事件 dict 列表，按 (month, day, category) 排序
-    """
+    """生成指定年份/分类的内置事件列表，按 (month, day, category) 排序。"""
     all_events = []
     for cat in enabled_categories:
         gen = _GENERATORS.get(cat)
@@ -394,8 +306,7 @@ def generate_for_year(year: int, enabled_categories: list) -> list:
     }
     all_events.sort(key=lambda e: (e["month"], e["day"], priority.get(e["category"], 9), e["text"]))
 
-    # 清明既是节气又是法定节假日，是唯一的语义重叠点。
-    # 当两类同时启用时，剔除节气「清明」（保留更正式的法定「清明节」）。
+    # 清明是节气与法定节假日的唯一重叠点：两类同时启用时剔除节气「清明」
     if CATEGORY_LEGAL in enabled_categories and CATEGORY_SOLAR_TERM in enabled_categories:
         legal_qingming = {
             (e["month"], e["day"])

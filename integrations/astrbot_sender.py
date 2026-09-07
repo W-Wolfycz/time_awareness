@@ -1,9 +1,4 @@
-"""主动消息发送适配层。
-
-``Context.send_message`` 不经过 ResultDecorate Pipeline。为了兼容其他分段插件，
-这里构造最小事件并按注册优先级运行 ``on_decorating_result``。Hook 可能主动发送
-部分消息，因此一旦开始执行装饰链，后续失败均视为不可安全自动重试。
-"""
+"""主动消息发送适配层：构造最小事件并运行 on_decorating_result 装饰链（一旦开始装饰链，后续失败不可安全重试）。"""
 
 from dataclasses import dataclass
 from typing import Any
@@ -30,12 +25,7 @@ class SendOutcome:
 
 
 class _ProactiveMessageEvent(AstrMessageEvent):
-    """让主动消息装饰器获得与普通平台事件一致的 ``send()`` 语义。
-
-    基础 ``AstrMessageEvent.send()`` 只记录发送指标，不会调用平台。BubbleReply
-    等装饰器会用 ``event.send()`` 发出前 N-1 段，因此主动消息必须在这里显式
-    委托 ``Context.send_message()``，否则前置分段（以及通常位于首段的 At）会丢失。
-    """
+    """让主动消息装饰器获得与普通平台事件一致的 send() 语义（委托 Context.send_message）。"""
 
     def __init__(
         self,
@@ -63,9 +53,7 @@ class _ProactiveMessageEvent(AstrMessageEvent):
             self._active_send_error = f"{type(e).__name__}: {e}"
             raise
         if not sent:
-            self._active_send_error = (
-                f"找不到 session 对应的平台: {self._outbound_session}"
-            )
+            self._active_send_error = f"找不到 session 对应的平台: {self._outbound_session}"
             raise RuntimeError(self._active_send_error)
         # 保留 AstrMessageEvent 的发送标记与指标语义；平台子类同样在实际发送成功后调用。
         await super().send(message)
@@ -125,8 +113,7 @@ class AstrBotMessageSender:
                 side_effects_started=event is not None,
             )
         if event and event.active_send_error:
-            # BubbleReply 等装饰器会在单段失败后保留剩余结果，让最终发送仍可继续。
-            # 此时尽量发完剩余内容，但不能把整条任务误记为成功，也不能自动重发。
+            # 装饰器单段失败后仍尽量发完剩余内容，但既不误记成功也不自动重发。
             return SendOutcome(
                 False,
                 f"装饰器前置分段发送失败: {event.active_send_error}",
@@ -163,8 +150,7 @@ class AstrBotMessageSender:
         message_obj.session_id = target_id
         message_obj.message = list(components)
         message_obj.self_id = "bot"
-        # 主动消息没有真实的入站发送者。群个人提醒用目标用户身份，供依赖
-        # sender_id 的装饰器正确选作用域；群广播及私聊主动消息保持空值。
+        # 主动消息无真实发送者；群个人提醒用目标用户身份供 sender_id 装饰器选作用域，其余保持空值。
         synthetic_sender_id = (
             str(sender_id or "").strip()
             if message_session.message_type == MessageType.GROUP_MESSAGE
@@ -202,8 +188,7 @@ class AstrBotMessageSender:
                     f"{tag()} ⚠️ 装饰钩子执行失败 {handler.handler_full_name}: {e}"
                 )
             if event.is_stopped():
-                # 与 AstrBot ResultDecorateStage 一致：stop_event() 后不再进入
-                # Respond/最终发送阶段。装饰器若已自行发送，调用方会将其视为已处理。
+                # 与 ResultDecorateStage 一致：stop_event() 后不再进入最终发送阶段。
                 return [], event
 
         final_result = event.get_result()

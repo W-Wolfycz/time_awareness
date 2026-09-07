@@ -1,8 +1,4 @@
-"""日历命令应用服务。
-
-不依赖 ``AstrMessageEvent``；最终 Star Handler 只负责把参数和回复文本转换为
-普通字符串，再将本服务返回的文本包装为 AstrBot result。
-"""
+"""日历命令应用服务（不依赖 AstrMessageEvent；Star Handler 只负责参数与回复文本转换）。"""
 
 from __future__ import annotations
 
@@ -144,8 +140,7 @@ class CalendarCommands:
                 return f"重复参数越界：{repeat_value}（应为 0/1-4/9）"
             final_title = title
         elif repeat_or_title:
-            # 第二个参数可能是「忘了写标题的重复参数」：纯数字且取值在合法
-            # repeat 范围内时明确报错，而不是静默创建标题为数字的事项
+            # 第二个参数可能是「忘了写标题的重复参数」：纯数字且取值合法时明确报错而非静默建数字标题
             try:
                 repeat_value = int(repeat_or_title)
             except ValueError:
@@ -227,7 +222,6 @@ class CalendarCommands:
 
         now = self._now()
         yield f"正在调用 AI 生成「{theme}」主题日历，请稍候……"
-        # 单次生成条数上限：配置 calendar.ai_generate_max_events（1–200，缺省 40）
         try:
             max_events = int(calendar_config.get("ai_generate_max_events", DEFAULT_MAX_GENERATE) or DEFAULT_MAX_GENERATE)
         except (TypeError, ValueError):

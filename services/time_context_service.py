@@ -1,9 +1,4 @@
-"""时间事实的 Prompt 与 Dashboard 渲染服务。
-
-静态规则仍由 ``main.py`` 注入 ``system_prompt``。本服务只把
-``TimeFactsCollector`` 的结构化事实渲染成当前轮动态标签、AI 生成输入或
-Dashboard DTO。
-"""
+"""把 ``TimeFactsCollector`` 的结构化事实渲染为动态标签、AI 生成输入或 Dashboard DTO。"""
 
 from __future__ import annotations
 
@@ -74,11 +69,9 @@ class TimeContextService:
         now=None,
         include_last_chat: bool = True,
         weather_text: str | None = None,
+        schedule_summary: str | None = None,
     ) -> str:
-        """把同一 ``now`` 快照渲染成本轮动态 XML 标签。
-
-        ``weather_text`` 由调用方（main.py hook）异步取实时天气后传入；为空则省略。
-        """
+        """把同一 ``now`` 快照渲染成本轮动态 XML 标签；weather/schedule 为空则省略对应标签。"""
         facts = self.facts.collect(
             scope="conversation",
             session=session,
@@ -89,6 +82,8 @@ class TimeContextService:
         if self.time_guidance_enabled():
             parts.append(self.build_datetime_reminder(now=facts.now))
         parts.append(f"<SCHEDULE_STATE>{facts.schedule.state}</SCHEDULE_STATE>")
+        if schedule_summary:
+            parts.append(f"<TODAY_SCHEDULE>{schedule_summary}</TODAY_SCHEDULE>")
         if weather_text:
             parts.append(f"<WEATHER>今日天气基调：{weather_text}</WEATHER>")
         if facts.workday.available:

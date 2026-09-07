@@ -1,18 +1,4 @@
-"""主动提醒调度器。
-
-调度器只负责任务队列、持久化和状态迁移，不依赖 AstrBot context；到期后的
-LLM/消息处理通过 ``trigger_callback`` 注入。
-
-v2 任务状态：
-
-``pending`` → ``processing`` → ``sent``
-                           ↘ ``retry_wait`` → ``processing``
-                           ↘ ``failed``
-
-进入 ``processing`` 前会先持久化 claim，发送成功后才确认 ``sent``。进程在 LLM
-阶段崩溃时可恢复重试；进入装饰/发送阶段后会持久化 ``delivery_started``，重启时
-转为 ``failed``，避免第三方装饰器已经发送部分消息后整条重复。
-"""
+"""主动提醒调度器：任务队列、持久化与状态迁移；LLM/消息处理经 trigger_callback 注入。"""
 
 from __future__ import annotations
 
@@ -52,11 +38,7 @@ TERMINAL_STATUSES = {STATUS_SENT, STATUS_FAILED, STATUS_CANCELLED, STATUS_EXPIRE
 
 @dataclass(frozen=True)
 class TriggerResult:
-    """到期回调返回的处理结果。
-
-    ``retryable`` 只应在尚未产生外部发送副作用时使用。主动消息装饰链可能
-    自行发送前 N-1 段，进入该阶段后的失败由上层返回不可重试结果，避免重复消息。
-    """
+    """到期回调结果；retryable 仅应在无外部发送副作用时使用。"""
 
     success: bool
     retryable: bool = False
@@ -88,9 +70,7 @@ class Task:
     processing_started_at: datetime.datetime | None = None
     delivery_started: bool = False
     created_at: datetime.datetime = field(default_factory=utc_now)
-    # 进入终态（sent/cancelled/expired/failed）的时刻；用于按全局
-    # runtime.state_retention_days 回收终态任务。旧格式无此字段时回退
-    # created_at/fire_at。
+    # 进入终态的时刻；旧格式缺省回退 created_at/fire_at，用于按保留期回收终态任务
     terminal_at: datetime.datetime | None = None
 
     def due_at(self) -> datetime.datetime:
@@ -114,13 +94,7 @@ class Task:
 
             status = str(raw.get("status", "")).strip().lower()
             if not status:
-                # v1 → v2：旧版 sent/given_up 标记映射为终态。
-                if bool(raw.get("sent", False)):
-                    status = STATUS_SENT
-                elif bool(raw.get("given_up", False)):
-                    status = STATUS_EXPIRED
-                else:
-                    status = STATUS_PENDING
+                status = STATUS_PENDING
             if status not in ACTIVE_STATUSES | {STATUS_PROCESSING} | TERMINAL_STATUSES:
                 logger.warning(f"{tag()} ⚠️ 未知任务状态 {status!r}，回退 pending")
                 status = STATUS_PENDING
@@ -184,33 +158,17 @@ class Task:
             "status": self.status,
             "attempts": self.attempts,
             "last_error": self.last_error,
-            "next_retry_at": (
-                to_utc(self.next_retry_at).isoformat()
-                if self.next_retry_at is not None
-                else None
-            ),
-            "processing_started_at": (
-                to_utc(self.processing_started_at).isoformat()
-                if self.processing_started_at is not None
-                else None
-            ),
+            "next_retry_at": _iso_or_none(self.next_retry_at),
+            "processing_started_at": _iso_or_none(self.processing_started_at),
             "delivery_started": self.delivery_started,
             "created_at": to_utc(self.created_at).isoformat(),
-            "terminal_at": (
-                to_utc(self.terminal_at).isoformat()
-                if self.terminal_at is not None
-                else None
-            ),
+            "terminal_at": _iso_or_none(self.terminal_at),
         }
 
 
 @dataclass
 class DueGroup:
-    """同一会话、同一目标用户、相邻触发时间窗口内的任务集合。
-
-    ``target_user_id`` 与分组键一致：不同目标用户（含空目标）的个人任务
-    不会被合并到同一组，避免发送阶段把任务发给错误的目标。
-    """
+    """同一会话、同一目标用户、相邻触发时间窗口内的任务集合；不同目标用户不合并。"""
 
     session: str
     tasks: list[Task]
@@ -231,6 +189,15 @@ def _parse_datetime(
     return to_utc(dt, default_tz=default_tz)
 
 
+def _iso_or_none(dt: datetime.datetime | None) -> str | None:
+    return to_utc(dt).isoformat() if dt is not None else None
+
+
+def _resolve_display_tz(display_tz: datetime.tzinfo | None) -> datetime.tzinfo:
+    """展示时区回退链：显式传入时区 > 系统本地时区 > UTC。"""
+    return display_tz or datetime.datetime.now().astimezone().tzinfo or UTC
+
+
 class ReminderScheduler:
     """持久化提醒队列和单一 asyncio 调度循环。"""
 
@@ -248,8 +215,7 @@ class ReminderScheduler:
         self._wakeup_event: Optional[asyncio.Event] = None
         self._stopped = True
         self._max_late_minutes_value = 60
-        # 终态任务（sent/cancelled/expired/failed）内存保留期（天），
-        # 由全局 runtime.state_retention_days 注入；缺省 7。
+        # 终态任务内存保留期（天），由 runtime.state_retention_days 注入，缺省 7
         self._state_retention_days = 7
         self._max_attempts = DEFAULT_MAX_ATTEMPTS
         self._now_provider = now_provider or (lambda: datetime.datetime.now())
@@ -269,8 +235,7 @@ class ReminderScheduler:
         return to_utc(dt, default_tz=self._legacy_default_tz())
 
     def set_max_late_minutes(self, minutes: int) -> None:
-        # 0 = 不检查迟到/不设最大迟到窗口（不清理也不超窗过期，
-        # 到期即发送，哪怕离线很久）；正数保持既有迟到容忍语义。
+        # 0=不检查迟到（到期即发，哪怕离线很久）；正数保持迟到容忍语义
         self._max_late_minutes_value = max(0, int(minutes))
 
     def set_max_attempts(self, attempts: int) -> None:
@@ -287,8 +252,6 @@ class ReminderScheduler:
     def state_retention_days(self) -> int:
         """当前生效的终态任务保留期（天）。"""
         return self._state_retention_days
-
-    # ==================== 持久化 ====================
 
     def load(self) -> None:
         if not os.path.exists(self._tasks_file):
@@ -330,10 +293,7 @@ class ReminderScheduler:
                     < now
                     - datetime.timedelta(minutes=self._max_late_minutes_value)
                 ):
-                    # 崩溃恢复同样受迟到容忍窗口约束：离线过久不深夜补发。
-                    # 否则处理中任务可绕过 _cleanup_expired（它只清 attempts==0
-                    # 的 pending）在数小时后继续发送。max_late==0（不检查迟到）
-                    # 时跳过该分支，恢复为可重试任务。
+                    # 崩溃恢复受迟到容忍窗口约束；max_late==0 时跳过，恢复为可重试
                     task.status = STATUS_EXPIRED
                     task.terminal_at = now
                     task.last_error = "崩溃恢复时已超过迟到容忍窗口"
@@ -379,8 +339,6 @@ class ReminderScheduler:
             except OSError:
                 pass  # Windows/部分挂载不支持 POSIX mode
         return ok
-
-    # ==================== 入队 ====================
 
     def _new_task(self, *, kind: str, session: str, fire_at: datetime.datetime, **kwargs) -> Task:
         task = Task(
@@ -436,8 +394,6 @@ class ReminderScheduler:
         )
         logger.debug(f"{tag()} 🧑 已入队手动提醒: id={task.id[:8]} session={session}")
         return task
-
-    # ==================== 调度循环 ====================
 
     def start(self) -> None:
         if self._loop_task is not None and not self._loop_task.done():
@@ -500,9 +456,7 @@ class ReminderScheduler:
                         raw_result = await self._trigger_callback(group)
                         result = self._normalize_result(raw_result)
                     except asyncio.CancelledError:
-                        # _claim_due 会一次性持久化本轮所有组的 processing 状态。
-                        # 当前回调被取消时，除当前组外，后续尚未开始的组也必须恢复，
-                        # 否则同一个 scheduler 实例再次 start 后它们不会重新入队。
+                        # 回调取消时，后续未开始组也必须恢复，否则再 start 后不会重新入队
                         for claimed_group in groups[group_index:]:
                             self._recover_processing(
                                 claimed_group,
@@ -526,11 +480,8 @@ class ReminderScheduler:
             return TriggerResult.fail("触发回调返回 False", retryable=True)
         return TriggerResult.ok()
 
-    # ==================== 到期任务处理 ====================
-
     def _cleanup_expired(self, now: datetime.datetime) -> int:
-        # max_late_minutes==0 表示“不检查迟到”：pending 不再因超窗被清理为
-        # EXPIRED，到期（含离线很久）的任务一律正常发送。
+        # max_late_minutes==0：不检查迟到，到期任务一律正常发送
         if self._max_late_minutes_value <= 0:
             return 0
         cutoff = now - datetime.timedelta(minutes=self._max_late_minutes_value)
@@ -547,20 +498,13 @@ class ReminderScheduler:
                     f"{tag()} ⚠️ 任务过期丢弃: id={task.id[:8]} kind={task.kind} "
                     f"session={task.session} fire_at={task.fire_at.isoformat()}"
                 )
-        # 终态任务（sent/cancelled/expired/failed）的回收统一由
-        # _cleanup_terminal_tasks 按 runtime.state_retention_days 执行，
-        # 不再在这里硬编码 7 天。
+        # 终态任务的回收统一由 _cleanup_terminal_tasks 按保留期执行
         if count:
             self.save()
         return count
 
     def _cleanup_terminal_tasks(self, now: datetime.datetime) -> int:
-        """按 state_retention_days 回收已过期的终态任务（只清内存与队列）。
-
-        终态任务以 terminal_at（旧格式缺省回退 created_at/fire_at）为基准，
-        超过保留期即从 _tasks 移除；活动任务（pending/retry_wait/processing）
-        一律不回收。
-        """
+        """按 state_retention_days 回收过期终态任务（以 terminal_at 为基准，旧格式回退）。"""
         cutoff = now - datetime.timedelta(days=self._state_retention_days)
         removed: list[Task] = []
         for task in self._tasks:
@@ -583,13 +527,7 @@ class ReminderScheduler:
         return len(removed)
 
     def _claim_due(self, now: datetime.datetime) -> list[DueGroup]:
-        # 迟到容忍窗口是进入 claim/发送前的最后一道闸：pending 或 retry_wait
-        # （含重启恢复、重试路径）一律不得绕过 max_late_minutes 补发。
-        # 超窗任务进入既有的过期终态（EXPIRED）并立即落盘；EXPIRED 是终态，
-        # save() 会将其从队列文件中移除（与 _cleanup_expired 同一清理语义），
-        # 因此本方法不会 claim/发送这类任务。
-        # max_late_minutes==0：不设迟到窗口，到期（哪怕已过很久）一律发送，
-        # 不做超窗过期。
+        # 迟到容忍窗口是 claim/发送前最后一道闸：超窗任务转 EXPIRED 并落盘，不 claim/发送
         cutoff = (
             now - datetime.timedelta(minutes=self._max_late_minutes_value)
             if self._max_late_minutes_value > 0
@@ -617,9 +555,7 @@ class ReminderScheduler:
         if not due:
             return []
 
-        # 分组键至少区分 (session, target_user_id)：同一会话中不同目标用户的
-        # 个人任务不得合并成一组发送；空目标（会话广播）与非空目标相互隔离。
-        # 同一目标用户仍按现有时间窗口合并。
+        # 分组键区分 (session, target_user_id)：不同目标用户（含空目标）不合并
         by_key: dict[tuple[str, str], list[Task]] = {}
         for task in due:
             by_key.setdefault((task.session, task.target_user_id), []).append(task)
@@ -694,10 +630,7 @@ class ReminderScheduler:
         return groups
 
     def mark_delivery_started(self, tasks: list[Task]) -> bool:
-        """在执行可能产生发送副作用的装饰链前持久化边界标记。
-
-        保存失败时回滚标记并返回 False；调用方此时不得进入发送阶段。
-        """
+        """在可能产生发送副作用的装饰链前持久化边界标记；保存失败回滚并返回 False。"""
         changed = []
         for task in tasks:
             if task.status == STATUS_PROCESSING and not task.delivery_started:
@@ -770,26 +703,18 @@ class ReminderScheduler:
                 )
         self.save()
 
-    # ==================== 查询 / 管理 ====================
-
     def has_calendar_task_for_session_today(
         self,
         session: str,
         today: datetime.date,
         tz: datetime.tzinfo | None = None,
     ) -> bool:
-        """判断该会话今天是否已有日历提醒任务（防重复入队）。
-
-        ``today`` 与 ``fire_at`` 必须使用同一时区基准：入队方以插件时区
-        创建 fire_at，因此 ``tz`` 应传插件时区；缺省回退系统本地时区
-        （宿主时区与插件时区不一致时可能误判，调用方应显式传入）。
-        """
+        """判断会话今天是否已有日历提醒任务（防重复入队）；tz 应传插件时区。"""
         local_tz = tz or self._legacy_default_tz()
         for task in self._tasks:
             if task.kind != "calendar" or task.session != session:
                 continue
-            # 只有"活着"的任务才阻塞重复入队；failed 是终态（临时故障
-            # 不应让当日提醒永久缺席），sent/cancelled/expired 同理。
+            # 仅活动任务阻塞重复入队；failed 等终态不阻塞
             if task.status not in ACTIVE_STATUSES | {STATUS_PROCESSING}:
                 continue
             if task.fire_at.astimezone(local_tz).date() == today:
@@ -803,12 +728,7 @@ class ReminderScheduler:
         return [task for task in self._tasks if task.status == STATUS_FAILED]
 
     def cancel_task(self, task_id: str):
-        """取消任务。
-
-        Returns:
-            True: 已取消；"final": 任务已处于终态（幂等成功）；
-            "processing": 任务正在发送，不能取消；False: 任务不存在。
-        """
+        """取消任务；返回 True/"final"/"processing"/False。"""
         for task in self._tasks:
             if task.id != task_id:
                 continue
@@ -833,7 +753,7 @@ class ReminderScheduler:
     ) -> list[dict]:
         pending = self.all_pending()
         pending.sort(key=lambda task: task.due_at())
-        display_tz = display_tz or datetime.datetime.now().astimezone().tzinfo or UTC
+        display_tz = _resolve_display_tz(display_tz)
         return [
             {
                 "id": task.id,
@@ -859,12 +779,7 @@ class ReminderScheduler:
         self,
         display_tz: datetime.tzinfo | None = None,
     ) -> list[dict]:
-        """保留期内的终态任务（sent/failed/cancelled/expired），供任务页查看历史。
-
-        与 ``_cleanup_terminal_tasks`` 同口径：以 terminal_at（缺省回退
-        created_at/fire_at）为基准、``runtime.state_retention_days`` 为窗口，
-        仅返回仍在保留期内的终态任务（按结束时间倒序）。
-        """
+        """保留期内的终态任务（按结束时间倒序），与 _cleanup_terminal_tasks 同口径。"""
         now = self._now_utc()
         cutoff = now - datetime.timedelta(days=self._state_retention_days)
         finished = []
@@ -879,7 +794,7 @@ class ReminderScheduler:
             key=lambda task: task.terminal_at or task.created_at or task.fire_at,
             reverse=True,
         )
-        display_tz = display_tz or datetime.datetime.now().astimezone().tzinfo or UTC
+        display_tz = _resolve_display_tz(display_tz)
         return [
             {
                 "id": task.id,

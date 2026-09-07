@@ -9,6 +9,7 @@ from typing import Any
 
 from ..domain.schedule import ScheduleValidationError, parse_time
 from ..log import logger, tag
+from ..utils.time_utils import _bounded_int
 
 
 class CalendarRuntimeService:
@@ -33,47 +34,31 @@ class CalendarRuntimeService:
         self._targets_provider = targets_provider
         self._sleep = sleep
 
-    @staticmethod
-    def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            parsed = default
-        return max(minimum, min(maximum, parsed))
+    def _config_group(self, name: str) -> dict:
+        value = self.config.get(name, {})
+        return value if isinstance(value, dict) else {}
+
+    def _max_late_minutes(self, reminder: dict) -> int:
+        return _bounded_int(
+            reminder.get("reminder_max_late_minutes", 60), 60, 0, 7 * 24 * 60
+        )
 
     def apply_reminder_config(self) -> None:
-        reminder = self.config.get("reminder", {})
-        if not isinstance(reminder, dict):
-            reminder = {}
-        # 注意：reminder_max_late_minutes=0 表示“不检查迟到/不设最大迟到窗口”，
-        # 不能再用 `or 60` 把 0 吞成默认 60。
-        self.scheduler.set_max_late_minutes(
-            self._bounded_int(
-                reminder.get("reminder_max_late_minutes", 60),
-                60,
-                0,
-                7 * 24 * 60,
-            )
-        )
+        reminder = self._config_group("reminder")
+        # 0 表示“不检查迟到”，不能再用 `or 60` 把 0 吞成默认 60。
+        self.scheduler.set_max_late_minutes(self._max_late_minutes(reminder))
         self.scheduler.set_max_attempts(
-            self._bounded_int(
+            _bounded_int(
                 reminder.get("reminder_max_attempts", 3) or 3,
                 3,
                 1,
                 10,
             )
         )
-        # 终态任务/日期锁的全局保留期：顶层 runtime.state_retention_days（1-365，
-        # 缺省 7）。只影响 Scheduler 终态内存任务与未占用 daily locks 回收，
-        # 不改变 AI 快照文件自身的 daily_schedule.ai_daily.retention_days。
-        runtime = self.config.get("runtime", {})
+        # 顶层 runtime.state_retention_days（1-365，缺省 7）只影响 Scheduler 终态任务与 daily locks 回收。
+        runtime = self._config_group("runtime")
         self.scheduler.set_state_retention_days(
-            self._bounded_int(
-                runtime.get("state_retention_days", 7) if isinstance(runtime, dict) else 7,
-                7,
-                1,
-                365,
-            )
+            _bounded_int(runtime.get("state_retention_days", 7), 7, 1, 365)
         )
 
     def initialize_builtin_events(self) -> None:
@@ -114,16 +99,11 @@ class CalendarRuntimeService:
             logger.error(f"{tag()} ❌ 内置事件跨年 regen 失败: {exc}")
 
     def scan_and_enqueue_today_events(self) -> int:
-        reminder = self.config.get("reminder", {})
-        if not isinstance(reminder, dict):
-            reminder = {}
+        reminder = self._config_group("reminder")
         if not reminder.get("enable_reminder", False):
             return 0
-        # 日历关闭且无问候需求时，日历提醒任务无内容可发（会被静默消费为
-        # sent）——不入队，避免用户误以为提醒生效。
-        calendar_config = self.config.get("calendar", {})
-        if not isinstance(calendar_config, dict):
-            calendar_config = {}
+        # 日历关闭且无问候需求时提醒无内容可发，不入队。
+        calendar_config = self._config_group("calendar")
         if (
             not calendar_config.get("enable_calendar", False)
             and not reminder.get("daily_greeting_without_events", True)
@@ -153,14 +133,8 @@ class CalendarRuntimeService:
             hour, minute = 9, 0
         fire_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-        max_late = self._bounded_int(
-            reminder.get("reminder_max_late_minutes", 60),
-            60,
-            0,
-            7 * 24 * 60,
-        )
-        # max_late==0：不检查迟到，即使提醒时刻早已过去也照常入队（由
-        # Scheduler 在 max_late=0 语义下到期即发送，不超窗丢弃）。
+        max_late = self._max_late_minutes(reminder)
+        # max_late==0：不检查迟到，时刻过去也照常入队（Scheduler 到期即发送）。
         if max_late > 0:
             cutoff = now - datetime.timedelta(minutes=max_late)
             if fire_at < cutoff:
@@ -173,8 +147,7 @@ class CalendarRuntimeService:
 
         enqueued = 0
         today = now.date()
-        # 去重与 fire_at 同用插件时区基准：宿主时区与插件时区不一致时
-        # 也不会把同一天的提醒误判为不同日期而重复入队。
+        # 去重与 fire_at 同用插件时区基准，避免宿主/插件时区不一致时重复入队。
         now_tz = now.tzinfo
         for session in targets:
             if self.scheduler.has_calendar_task_for_session_today(

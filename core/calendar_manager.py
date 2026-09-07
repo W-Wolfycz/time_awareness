@@ -1,13 +1,4 @@
-"""
-时间表（日历事项）管理器
-
-负责 ``calendar_data.yaml`` 的读写、事项 CRUD、批量清除、导入/导出与校验。
-读写完成后回填注入的 ``CalendarStore`` 实例，供 ``<TODAY_EVENTS>`` 标签注入使用。
-
-数据文件位于插件数据目录（``StarTools.get_data_dir``），全局共享一份时间表
-（不区分会话）。持久化格式为 YAML（``calendar_data.yaml``）；不再支持历史
-``calendar_data.json`` 的自动迁移，运行时只认当前 YAML 格式。
-"""
+"""时间表管理器：calendar_data.yaml 读写、CRUD、批量清除、导入导出与校验；写后回填 CalendarStore。"""
 
 import datetime
 import os
@@ -37,21 +28,14 @@ MAX_YEAR = 9999
 
 
 class CalendarManager:
-    """时间表管理器类
-
-    直接接收数据目录字符串而非 persistence_manager 对象，避免对其他系统产生耦合。
-    """
+    """时间表管理器；直接接收数据目录字符串，避免与其他系统耦合。"""
 
     def __init__(self, data_dir: str, store: CalendarStore | None = None):
         self.data_dir = data_dir
         self.store = store if store is not None else CalendarStore()
 
-    # ==================== 路径 ====================
-
     def _calendar_file_path(self) -> str:
         return os.path.join(self.data_dir, CALENDAR_FILE_NAME)
-
-    # ==================== 校验 / 规整 ====================
 
     def normalize_event(self, raw: dict) -> dict | None:
         """将单条原始事项规整为合法结构；非法返回 None。"""
@@ -111,8 +95,6 @@ class CalendarManager:
                 break
         return normalized
 
-    # ==================== 读 / 写 ====================
-
     def load(self) -> None:
         """从 ``calendar_data.yaml`` 加载事项到内存单例（启动时调用）。"""
         try:
@@ -157,13 +139,9 @@ class CalendarManager:
             "events": list(self.store.events),
         }
 
-    # ==================== 查询 ====================
-
     def get_events(self) -> list:
         """返回全部事项（内存副本）。"""
         return list(self.store.events)
-
-    # ==================== CRUD ====================
 
     def add_event(self, raw: dict) -> dict | None:
         """新增一条事项；成功返回创建后的事项，失败返回 None。"""
@@ -218,16 +196,7 @@ class CalendarManager:
     def clear(
         self, scope: str = "all", year: int | None = None, month: int | None = None
     ) -> int:
-        """批量清除事项。
-
-        Args:
-            scope: ``all``=全部；``year``=某基准年；``month``=某基准年的某月。
-            year: scope 为 year/month 时的基准年。
-            month: scope 为 month 时的月份。
-
-        Returns:
-            被删除的事项数量（保存失败时返回 0 且不改动）。
-        """
+        """批量清除；scope=all/year/month，返回删除数量（保存失败返回 0 不改动）。"""
         before = self.store.events
         if scope == "all":
             kept = []
@@ -253,8 +222,6 @@ class CalendarManager:
             return 0
         return removed_count
 
-    # ==================== 导入 / 导出 ====================
-
     def export_yaml(self) -> str:
         """将当前全部事项导出为 YAML 文本。"""
         payload = {
@@ -274,11 +241,7 @@ class CalendarManager:
 
     @staticmethod
     def parse_import_content(content: str):
-        """解析导入文件的 YAML 文本，返回原始事项列表。
-
-        兼容两种结构：顶层为事项数组，或含 ``events`` 字段的映射。
-        解析失败或结构非法返回 ``None``（由调用方区分「空表」与「非法」）。
-        """
+        """解析导入 YAML：顶层数组或含 events 字段的映射；非法返回 None。"""
         if not isinstance(content, str) or not content.strip():
             return None
         try:
@@ -292,15 +255,7 @@ class CalendarManager:
         return None
 
     def import_events(self, raw_events, mode: str = "merge") -> int:
-        """导入事项。
-
-        Args:
-            raw_events: 事项列表（来自 YAML 文件解析）。
-            mode: ``merge``=合并到现有；``replace``=替换全部。
-
-        Returns:
-            成功导入（规整后）的事项数量；保存失败返回 -1。
-        """
+        """导入事项；mode=merge/replace，返回规整后数量，保存失败返回 -1。"""
         incoming = self._normalize_events(raw_events)
         for event in incoming:
             event["id"] = uuid.uuid4().hex

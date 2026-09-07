@@ -1,30 +1,4 @@
-"""
-时间表（日历事项）内存存储
-
-仿 ``runtime_data`` 的单例模式，仅持有「时间表事项」的内存副本与纯逻辑（匹配、
-拼接），不做任何文件 IO、也不依赖 AstrBot context。
-
-设计目标（单一真相源）：
-- ``CalendarStore`` 是「当天事项」取值逻辑的唯一来源，占位符解析与
-  ``CalendarManager`` 均从本单例读取。
-- 文件读写、CRUD 与校验由 ``core/calendar_manager.py`` 负责，写入后回填本单例。
-
-事项数据结构（单条）::
-
-    {
-        "id": "<uuid hex>",   # 稳定标识，供编辑/删除定位
-        "year": 2026,          # 基准年（首次生效年份，也用于显示）
-        "month": 1,            # 1-12
-        "day": 1,              # 1-31（闰日 2-29 仅在闰年匹配）
-        "text": "元旦",        # 事项描述
-        "repeat": 0            # 重复规则，见下方常量
-    }
-
-重复规则（``repeat`` 取值语义）：
-- ``REPEAT_NONE``（0）：仅在「基准年」当天生效。
-- 1..4：基准年 + 之后 N 年，共 ``N + 1`` 年生效。
-- ``REPEAT_FOREVER``（-1）：每年重复（永久），忽略年份，仅按月-日匹配。
-"""
+"""时间表内存存储：仅持事项副本与匹配/拼接纯逻辑，不做 IO；repeat 语义见 normalize_repeat。"""
 
 import calendar as _cal
 
@@ -53,11 +27,7 @@ MAX_EVENTS = 2000
 
 
 def valid_month_day(month: int, day: int, year: int | None = None) -> bool:
-    """校验 (month, day) 是否为合法日期。
-
-    ``year`` 提供时按该年的实际天数校验（非闰年 2 月拒绝 29 日）；
-    缺省按「年年可重复」的上限校验（2 月允许 29）。
-    """
+    """校验 (month, day)；year 提供时按实际天数（非闰年 2 月拒 29），缺省按可重复上限。"""
     if month not in _MONTH_MAX_DAYS:
         return False
     if year is not None:
@@ -91,9 +61,7 @@ def event_active_in_year(event: dict, year: int) -> bool:
 
 
 class CalendarStore:
-    """时间表事项内存存储。
-
-    """
+    """时间表事项内存存储。"""
 
     def __init__(self):
         self.events: list = []  # 用户自定义事件（calendar_data.yaml）
@@ -114,11 +82,7 @@ class CalendarStore:
 
     @staticmethod
     def _event_active_on(event: dict, year: int, month: int, day: int) -> bool:
-        """判断事件在指定公历日期是否生效。
-
-        builtin 事件已按公历 year 生成，year 必须精确匹配；
-        user 事件保留 repeat 规则（每年/连续N年/仅当年）。
-        """
+        """判断事件在指定公历日期是否生效；builtin 精确匹配 year，user 按 repeat 规则。"""
         if event.get("month") != month or event.get("day") != day:
             return False
         if event.get("source") == "builtin":
@@ -126,11 +90,7 @@ class CalendarStore:
         return event_active_in_year(event, year)
 
     def events_for_date(self, year: int, month: int, day: int, include_builtin: bool = True) -> list:
-        """返回指定日期生效的事项（用户 + 内置合并去重）。
-
-        去重规则：相同 (month, day, text) 只保留先入队的那条，user 优先于 builtin。
-        返回顺序：user 事件（插入序）→ builtin 事件（生成序），去重后的。
-        """
+        """指定日期生效事项；按 (month,day,text) 去重，user 优先于 builtin。"""
         result: list = []
         seen: set = set()
 
@@ -152,10 +112,7 @@ class CalendarStore:
         return result
 
     def events_for_month(self, year: int, month: int, include_builtin: bool = True) -> list:
-        """返回指定月份生效的事项（按日期升序，同日保持顺序）。
-
-        只迭代该年该月的实际天数，不产生 2-29/4-31 等幽灵日期。
-        """
+        """指定月份生效事项（日期升序）；只迭代当月实际天数，无幽灵日期。"""
         # 复用 events_for_date 拿每天的列表，避免去重逻辑漂移
         result = []
         seen_keys = set()

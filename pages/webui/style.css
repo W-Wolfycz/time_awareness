@@ -226,14 +226,6 @@ a:hover { color: var(--primary-hover); }
   padding: 18px;
   box-shadow: var(--shadow-sm);
 }
-.card-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-}
 
 .badge {
   display: inline-flex;
@@ -310,17 +302,6 @@ a:hover { color: var(--primary-hover); }
 
 .row-finished td {
   opacity: 0.78;
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 12px;
-  background: var(--surface-muted);
-  color: var(--text);
-  border: 1px solid var(--border);
 }
 
 .table-wrap {
@@ -462,9 +443,6 @@ table.data-table {
   align-items: flex-end;
   justify-content: center;
   position: relative;
-}
-.hero-time-main {
-  /* 主时间文本——沿用父级字号，自身居中 */
 }
 .hero-time-tz {
   font-size: 14px;
@@ -1093,14 +1071,6 @@ select.form-input {
   margin-bottom: 14px;
   line-height: 1.7;
 }
-.schedule-origin-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  margin-bottom: 14px;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
 .schedule-origin-legend > span {
   display: inline-flex;
   align-items: center;
@@ -1287,20 +1257,11 @@ select.form-input {
   flex-wrap: wrap;
   gap: 6px;
 }
-.boundary-chip {
-  font-size: 11px;
-  background: var(--surface-subtle);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 8px;
-  color: var(--text-secondary);
-}
 .boundary-plans {
   font-size: 12px;
   color: var(--text-muted);
   margin-bottom: 6px;
 }
-
 
 /* ==================== 天气连接测试 ==================== */
 .weather-test-card { margin: 0 0 20px; padding: 18px; }
@@ -1318,3 +1279,5 @@ select.form-input {
 }
 .weather-test-result.weather-test-ok { color: #3cb371; }
 .weather-test-result.weather-test-err { color: #e05f5f; }
+
+.weather-cell-variation { margin-top: 4px; font-size: 12px; color: var(--text-secondary); flex-basis: 100%; }

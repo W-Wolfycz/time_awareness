@@ -90,12 +90,6 @@
         "default": false,
         "hint": "向 LLM 提供今日干支、冲煞和宜忌；建议与农历感知一同启用",
         "invisible": true
-      },
-      "_sensor_selector_migrated": {
-        "description": "传感器多选迁移标记（内部）",
-        "type": "bool",
-        "default": false,
-        "invisible": true
       }
     }
   },
@@ -404,13 +398,13 @@
             "hint": "HH:MM 当天生成当天；-HH:MM 前一天提前生成次日（如 -23:30 今晚生成明天）"
           },
           "max_slots": {
-            "description": "📏 AI 最大时段数",
+            "description": "🔢 AI 输出时段期望",
             "type": "int",
             "default": 24,
             "condition": {
               "enabled": true
             },
-            "hint": "模型最大时段数（1–48）；默认提示约 8-12 段，允许留空档"
+            "hint": "AI 输出时段数的期望值（约这个数，可多可少，不是硬上限；超出 60 条会被防失控安全上限截断）"
           },
           "retention_days": {
             "description": "🗃️ 快照保留天数",
@@ -455,35 +449,6 @@
               "random_weather_enabled": true
             },
             "hint": "每行一条「天气,权重」，权重越高出现概率越大（白天/黑夜各自独立抽取）；非法行自动跳过，留空=内置默认池"
-          },
-          "ai_generation": {
-            "description": "",
-            "type": "object",
-            "invisible": true,
-            "hint": "旧分组兼容副本；首次加载时迁移到 AI 每日日程的直接字段",
-            "items": {
-              "provider_id": {
-                "description": "",
-                "type": "string",
-                "default": "",
-                "_special": "select_provider"
-              },
-              "use_persona": {
-                "description": "",
-                "type": "bool",
-                "default": true
-              },
-              "worldview": {
-                "description": "",
-                "type": "text",
-                "default": ""
-              },
-              "max_attempts": {
-                "description": "",
-                "type": "int",
-                "default": 3
-              }
-            }
           },
           "adaptive": {
             "description": "🔄 自适应每日日程",
@@ -614,61 +579,10 @@
                   "enabled": true
                 },
                 "hint": "等并发槽位超时秒数（0–120）；超时回退旧快照/静态日程，不阻塞消息"
-              },
-              "_removed_priority_option": {
-                "description": "",
-                "type": "bool",
-                "default": false,
-                "invisible": true
               }
             }
           }
         }
-      },
-      "ai_generation": {
-        "description": "",
-        "type": "object",
-        "invisible": true,
-        "hint": "最早版本的兼容副本；首次加载时迁移到 daily_schedule.ai_daily 的直接生成字段",
-        "items": {
-          "provider_id": {
-            "description": "🤖 使用的模型",
-            "type": "string",
-            "default": "",
-            "_special": "select_provider",
-            "hint": "留空时使用 AstrBot 全局默认 Provider（不从会话临时 Provider 猜测）"
-          },
-          "use_persona": {
-            "description": "🧑 使用当前 Persona",
-            "type": "bool",
-            "default": true,
-            "hint": "默认且建议保持开启：生成时输入当前实际生效 Persona。关闭仅表示不把 Persona prompt 发给规划模型，AI 每日日程仍必须有 Persona ID 用于身份隔离"
-          },
-          "worldview": {
-            "description": "🌍 世界观 / 长期背景",
-            "type": "text",
-            "default": "",
-            "hint": "稳定的世界设定、时代、职业环境或长期生活背景；每日 theme 会由模型在此背景下另行生成，不需要每天修改"
-          },
-          "max_attempts": {
-            "description": "🔁 单步 LLM 最大尝试次数",
-            "type": "int",
-            "default": 3,
-            "hint": "范围 1–5，包含首次调用；分别用于角色状态评估、方案生成、重复检测与评选，不会整套工作流乘法重跑"
-          }
-        }
-      },
-      "_ai_generation_migrated": {
-        "description": "",
-        "type": "bool",
-        "default": false,
-        "invisible": true
-      },
-      "_ai_generation_flat_migrated": {
-        "description": "",
-        "type": "bool",
-        "default": false,
-        "invisible": true
       }
     }
   },
@@ -696,10 +610,10 @@
         "hint": "/calendar create 的世界观；生成会替换全部自定义事项，不影响内置事件"
       },
       "ai_generate_max_events": {
-        "description": "🔢 AI 日历单次生成事项上限",
+        "description": "🔢 AI 日历单次生成事项期望",
         "type": "int",
         "default": 40,
-        "hint": "/calendar create 单次生成的自定义事项条数上限（1–200）；值会写入生成提示词"
+        "hint": "/calendar create 单次生成的自定义事项条数期望值（约这个数，可多可少，不是硬上限；超出 400 条会被防失控安全上限截断）"
       },
       "builtin_event_categories": {
         "description": "🏷️ 内置现实事件分类（多选）",
@@ -768,32 +682,7 @@
           }
         },
         "invisible": true
-      },
-      "_builtin_selector_migrated": {
-        "description": "内置事件多选迁移标记（内部）",
-        "type": "bool",
-        "default": false,
-        "invisible": true
       }
     }
-  },
-  "log": {
-    "description": "📝 日志设置",
-    "type": "object",
-    "items": {
-      "log_with_bot_id": {
-        "description": "🤖 日志区分机器人实例",
-        "type": "bool",
-        "default": false,
-        "hint": "在日志前缀中加入平台实例标识，便于区分多个 Bot"
-      },
-      "_log_group_migrated": {
-        "description": "日志分组迁移标记（内部）",
-        "type": "bool",
-        "default": false,
-        "invisible": true
-      }
-    },
-    "invisible": true
   }
 }

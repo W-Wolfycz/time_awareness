@@ -1,13 +1,4 @@
-"""
-AI 时间表生成器
-
-根据用户给出的主题/世界观提示词（如「异世界/魔法/节日」），发起一次 LLM 调用，
-让 AI 输出一整套贴合主题的日历事项（JSON 数组），解析后交由调用方预览 / 落盘。
-
-设计：
-- 纯解析逻辑（``parse_generated_events``）不依赖 AstrBot context，便于单测。
-- LLM 调用封装在 ``generate_calendar_events`` 中，失败不抛出而是返回 ``None``。
-"""
+"""AI 时间表生成器：按主题提示词调用 LLM 输出日历事项 JSON 数组。"""
 
 from typing import Optional
 
@@ -61,10 +52,7 @@ def _coerce_event(raw: dict) -> Optional[dict]:
 
 
 def parse_generated_events(response_text: str) -> Optional[list]:
-    """从 LLM 返回文本中解析出事项列表（JSON 数组）。
-
-    兼容：纯 JSON 数组；```json ... ``` 代码块；数组前后带有多余说明文字。
-    """
+    """从 LLM 返回文本中解析出事项列表（JSON 数组）。"""
     if not response_text or not isinstance(response_text, str):
         return None
 
@@ -83,23 +71,14 @@ def parse_generated_events(response_text: str) -> Optional[list]:
         logger.warning(f"{tag()} ⚠️ AI 生成时间表结果不是数组")
         return None
 
-    events = []
-    for raw in data:
-        event = _coerce_event(raw)
-        if event is not None:
-            events.append(event)
-    return events
+    return [event for raw in data if (event := _coerce_event(raw)) is not None]
 
 
 def build_system_prompt(current_year: int, max_events: int) -> str:
-    """组装 AI 生成的系统提示词：内置指令 + 运行时约束（年份、数量上限）。
-
-    系统提示词的指令部分硬编码在 constants.DEFAULT_AI_GENERATE_SYSTEM_PROMPT，
-    不接受用户配置；用户只通过命令行参数或 calendar.ai_generate_worldview 提供世界观设定。
-    """
+    """组装 AI 生成的系统提示词：内置指令 + 运行时约束（年份、数量上限）。"""
     suffix = (
         f"\n\n当前年份为 {current_year}（如需填写基准年请使用该年份）。"
-        f"本次最多生成 {max_events} 条事项，请勿超过。"
+        f"本次生成事项数量以 {max_events} 条为期望（约这个数，可多可少，覆盖四季即可）。"
     )
     return DEFAULT_AI_GENERATE_SYSTEM_PROMPT + suffix
 
@@ -143,9 +122,10 @@ async def generate_calendar_events(
     if events is None:
         return None
 
-    if len(events) > max_events:
-        logger.warning(f"{tag()} ⚠️ AI 生成时间表超过上限 {max_events}，已截断")
-        events = events[:max_events]
+    # max_events 是期望值而非硬上限：只保留固定防失控安全上限
+    if len(events) > 400:
+        logger.warning(f"{tag()} ⚠️ AI 生成时间表超过安全上限 400，已截断")
+        events = events[:400]
     for event in events:
         event.setdefault("year", current_year)
 

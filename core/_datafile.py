@@ -1,19 +1,4 @@
-"""
-数据文件读写助手（YAML 持久化）
-
-集中插件持久化文件的通用读写逻辑，供 ``calendar_manager`` 复用，避免
-「多编码读取 + 原子写入 + 临时文件清理」逻辑分散在多处实现而漂移。
-
-设计要点：
-- 仅使用 ``yaml.safe_load`` / ``yaml.safe_dump``，杜绝任意对象构造带来的安全风险。
-- 写入采用 ``allow_unicode=True``（中文不转义）、``sort_keys=False``（保持插入顺序，
-  diff 友好）、``default_flow_style=False``（块状缩进，最直观）。
-- 写入使用「``.tmp`` + ``os.replace``」原子替换；替换前 flush + fsync，减少进程
-  崩溃时留下空文件或半文件的概率。
-- 读取优先使用 libyaml C 扩展（``CSafeLoader``）提速；写出固定使用纯 Python
-  ``SafeDumper``：libyaml 的 C emitter 会忽略按节点设置的块样式（``|``）并转义
-  星平面 Unicode（如 emoji），使长消息可读性变差。
-"""
+"""YAML 持久化助手：safe_load/safe_dump、原子替换；读用 CSafeLoader，写固定纯 Python SafeDumper（C emitter 转义 emoji）。"""
 
 import os
 
@@ -58,10 +43,7 @@ def dump_yaml_str(data: dict, header: str | None = None) -> str:
 
 
 def load_mapping(path: str):
-    """从 YAML 文件读取一个映射（dict）。
-
-    失败/根对象不是 dict 时记录日志并返回 None。
-    """
+    """读取 YAML 映射；失败/根对象非 dict 记日志并返回 None。"""
     data = None
     for encoding in _READ_ENCODINGS:
         try:
@@ -98,10 +80,7 @@ def load_mapping(path: str):
 
 
 def atomic_write_yaml(path: str, data: dict, header: str | None = None) -> bool:
-    """原子性地将映射写入 YAML 文件。
-
-    临时文件带 pid 后缀：多进程共享数据目录时避免互相覆盖对方的 .tmp。
-    """
+    """原子写入 YAML；临时文件带 pid 后缀避免多进程互相覆盖 .tmp。"""
     temp_file = f"{path}.{os.getpid()}.tmp"
     try:
         with open(temp_file, "w", encoding="utf-8") as f:

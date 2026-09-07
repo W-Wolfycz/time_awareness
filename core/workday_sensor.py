@@ -1,14 +1,4 @@
-"""
-工作日性质感知——实时判定今天是工作日/周末/调休工作日/节假日。
-
-与 ``builtin_events`` 的 ``legal_holiday`` 分类**职责分离**：
-
-- ``legal_holiday`` 是「事件清单」（今天是 X 节），进 ``<TODAY_EVENTS>``
-- ``WorkdaySensor`` 是「日历性质元信息」（今天是工作日/周末），进 ``<WORKDAY_STATE>``
-
-无状态：``chinese_calendar`` 实时查，不需要 regen/跨年/store 机制——
-工作日判定每年都不同（调休规则可能调整），用预生成反而会过期。
-"""
+"""工作日性质感知：实时判定工作日/周末/调休/节假日；无状态（调休规则每年变，不预生成）。"""
 
 import datetime
 
@@ -16,16 +6,7 @@ from ..log import logger, tag
 
 
 class WorkdaySensor:
-    """判定日期性质。
-
-    返回 ``(kind, label)``：
-
-    - ``('workday', '工作日（周X）')``
-    - ``('weekend', '周末（周X）')``
-    - ``('adjusted', '调休工作日（周X）')``  ← 周末但需上班
-    - ``('holiday', '节假日（周X）')``       ← 法定节假日（不重复节日名，由 ``<TODAY_EVENTS>`` 提供）
-    - ``('unknown', '周X')``                 ← ``chinese_calendar`` 未覆盖年份时的降级
-    """
+    """返回 (kind, label)：workday/weekend/adjusted/holiday；库未覆盖年份降级 unknown。"""
 
     _WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 

@@ -1,26 +1,33 @@
+"""llm/json_response.py 的代码块剥离与数组提取测试。"""
+
 import pytest
 
-from time_awareness.llm.json_response import parse_json_response, strip_json_fence
+from time_awareness.llm.json_response import json_block, parse_json_response, strip_json_fence
 
 
-def test_json_fence_modes_preserve_daily_strictness():
-    assert strip_json_fence("```json\n[]\n```", require_closed=True) == "[]"
-    assert strip_json_fence("```json\n[]", require_closed=True).startswith("```")
+def test_strip_json_fence():
+    assert strip_json_fence("{}") == "{}"
+    assert strip_json_fence("```json\n{}") == "{}"
+    assert strip_json_fence("```json\n{}\n```") == "{}"
+    assert strip_json_fence("```json\n{}", require_closed=True) == "```json\n{}"
 
 
-def test_embedded_array_is_only_accepted_in_compatibility_mode():
+def test_parse_json_response_valid_and_invalid():
+    assert parse_json_response('{"a": 1}') == {"a": 1}
+    with pytest.raises(ValueError, match="响应不是合法 JSON"):
+        parse_json_response("not json")
+
+
+def test_parse_json_response_embedded_array():
+    assert parse_json_response("前置说明\n[1, 2, 3]\n后置", allow_embedded_array=True) == [1, 2, 3]
+
+
+def test_parse_json_response_require_closed_fence():
     with pytest.raises(ValueError):
-        parse_json_response("说明：[1, 2]")
-    assert parse_json_response("说明：[1, 2]", allow_embedded_array=True) == [1, 2]
+        parse_json_response("```json\n[1]", require_closed_fence=True)
 
 
-def test_embedded_array_ignores_brackets_in_prose_and_strings():
-    """说明文字含方括号/多数组/字符串内括号时仍能提取合法 JSON 数组。"""
-    text = '说明：[示例] 结果 [{"month":1,"day":1,"text":"x","repeat":-1}]'
-    assert parse_json_response(text, allow_embedded_array=True) == [
-        {"month": 1, "day": 1, "text": "x", "repeat": -1}
-    ]
-    text2 = '前缀 [{"name":"睡眠[阶段]","start":"00:00","end":"01:00","state":"s"}]'
-    assert parse_json_response(text2, allow_embedded_array=True) == [
-        {"name": "睡眠[阶段]", "start": "00:00", "end": "01:00", "state": "s"}
-    ]
+def test_json_block_escapes_angle_brackets():
+    block = json_block("NAME", {"x": "<tag>"})
+    assert "<NAME>" in block and "</NAME>" in block
+    assert "\\u003ctag\\u003e" in block

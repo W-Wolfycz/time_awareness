@@ -125,13 +125,11 @@ class StaticScheduleConfigService:
 
     @staticmethod
     def _display_slot(item: dict) -> dict:
+        template_key = str(item.get("__template_key", "time_slot") or "time_slot")
+        if template_key not in _KNOWN_TEMPLATE_KEYS:
+            template_key = "time_slot"
         return {
-            "__template_key": (
-                str(item.get("__template_key", "time_slot") or "time_slot")
-                if str(item.get("__template_key", "time_slot") or "time_slot")
-                in _KNOWN_TEMPLATE_KEYS
-                else "time_slot"
-            ),
+            "__template_key": template_key,
             "name": str(item.get("name", "") or ""),
             "start_time": str(item.get("start_time", "") or ""),
             "end_time": str(item.get("end_time", "") or ""),

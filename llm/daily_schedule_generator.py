@@ -1,15 +1,8 @@
-"""AI 每日日程输出解析与严格校验。
-
-Step2 规划统一使用数组协议：``[{name,start,end,state}, ...]``（允许空数组）。
-theme/boundary_state 由 Step1 边界评估（``evaluate_boundary``）独立输出，
-不再使用旧的对象协议。未知键、XML 标签、控制字符与越界状态值一律拒绝。
-"""
+"""AI 每日日程输出解析与严格校验（Step2 统一数组协议；未知键/XML/控制字符/越界状态一律拒绝）。"""
 
 from __future__ import annotations
 
-import json
 import math
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,16 +12,16 @@ from ..constants import (
     DEFAULT_DAILY_SCHEDULE_SYSTEM_PROMPT,
 )
 from ..domain.schedule import (
+    _CONTROL_CHARS,
     ScheduleValidationError,
     normalize_daily_slots,
     parse_time,
     schedule_similarity,
 )
 from ..log import logger, tag
-from .json_response import parse_json_response
+from .json_response import json_block, parse_json_response
 
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 # 日界状态白名单键（有限范围、去身份化）
 _BOUNDARY_STATE_NUMERIC_KEYS = {"energy", "sleep_debt", "focus", "social_energy", "motivation"}
@@ -36,10 +29,7 @@ _BOUNDARY_STATE_STRING_KEYS = {"physical_state", "daily_theme", "daily_style"}
 
 
 def empty_boundary() -> dict:
-    """全维度 null 种子：边界评估失败/无历史时存储仍保持全维度（缺失 = null）。
-
-    保证快照 boundary_state 恒为 9 个维度齐全，任何消费方都不需要处理缺字段。
-    """
+    """全维度 null 种子：保证 boundary_state 恒为 9 个维度齐全。"""
     return {
         "energy": None,
         "sleep_debt": None,
@@ -52,8 +42,7 @@ def empty_boundary() -> dict:
         "unfinished_plans": None,
     }
 
-# 情绪（mood/心情/情绪等）已交由好感插件管理，日界状态不再承载——
-# 模型若输出这些维度，校验时给出明确提示而非静默接受。
+# 情绪维度已交由好感插件管理，模型若输出则校验时明确拒绝而非静默接受。
 _MOOD_ALIASES = {"mood", "心情", "情绪", "状态", "心境"}
 
 # 已知别名归一化映射：LLM 用中文/同义词输出时归并到标准字段
@@ -103,36 +92,8 @@ def _validate_slot(item: Any) -> dict:
     }
 
 
-def _validate_theme(value: Any) -> dict:
-    """校验 theme 对象；缺失或空对象返回 {}。"""
-    if value in (None, {}):
-        return {}
-    if not isinstance(value, dict):
-        raise ScheduleValidationError("theme 必须是对象")
-    allowed = {"archetype", "variation_axis", "main_goal"}
-    if set(value) - allowed:
-        raise ScheduleValidationError("theme 含未知字段")
-    result = {}
-    for key in ("archetype", "variation_axis", "main_goal"):
-        raw = value.get(key, "")
-        if raw in (None, ""):
-            continue
-        result[key] = _clean_text(
-            raw,
-            field=f"theme.{key}",
-            max_length=60 if key == "archetype" else 160,
-        )
-    return result
-
-
 def _validate_boundary_state(value: Any) -> dict:
-    """校验日界状态；缺失/空对象/全省略（稀疏输出）返回 {}。
-
-    固定 9 维度：energy/sleep_debt/focus/social_energy/motivation（0-100）、
-    physical_state/daily_theme/daily_style（短标签）、unfinished_plans（数组）。
-    模型的中文/同义字段按别名映射归一化；情绪维度（mood/心情/情绪等）
-    已交由好感插件管理，输出时给出明确提示拒绝。
-    """
+    """校验日界状态；缺失/空/全省略返回 {}（9 维度，别名归一化，情绪维度拒绝）。"""
     if value in (None, {}):
         return {}
     if not isinstance(value, dict):
@@ -168,32 +129,24 @@ def _validate_boundary_state(value: Any) -> dict:
         if not math.isfinite(number) or not 0.0 <= number <= 100.0:
             raise ScheduleValidationError(f"boundary_state.{key} 必须位于 0-100")
         result[key] = number
-    if "physical_state" in normalized and normalized["physical_state"] not in (None, ""):
-        result["physical_state"] = _clean_text(
-            normalized["physical_state"],
-            field="boundary_state.physical_state",
-            max_length=12,
-        )
-    if "daily_theme" in normalized and normalized["daily_theme"] not in (None, ""):
-        result["daily_theme"] = _clean_text(
-            normalized["daily_theme"],
-            field="boundary_state.daily_theme",
-            max_length=20,
-        )
-    if "daily_style" in normalized and normalized["daily_style"] not in (None, ""):
-        result["daily_style"] = _clean_text(
-            normalized["daily_style"],
-            field="boundary_state.daily_style",
-            max_length=12,
-        )
+    for key, max_length in (
+        ("physical_state", 12),
+        ("daily_theme", 20),
+        ("daily_style", 12),
+    ):
+        if key in normalized and normalized[key] not in (None, ""):
+            result[key] = _clean_text(
+                normalized[key],
+                field=f"boundary_state.{key}",
+                max_length=max_length,
+            )
     if "unfinished_plans" in normalized and normalized["unfinished_plans"] is not None:
         plans = normalized["unfinished_plans"]
         if not isinstance(plans, list):
             raise ScheduleValidationError("unfinished_plans 必须是数组")
         if len(plans) > 8:
             raise ScheduleValidationError("unfinished_plans 超出 8 项上限")
-        # 空数组是「显式清空」（当日计划已全部完成）：保留为 []，
-        # 不得与「键缺失」混同——否则 _fill_boundary 会把昨日计划错误继承到次日。
+        # 空数组是「显式清空」，不得与「键缺失」混同（否则昨日计划被错误继承）。
         cleaned = []
         for index, plan in enumerate(plans):
             cleaned.append(
@@ -211,31 +164,24 @@ class PlanningResult:
 
 
 def parse_daily_schedule_json(text: str, *, max_slots: int = 24) -> list[dict]:
-    """解析基础数组协议输出；只接受协议字段、日内非跨午夜且互不重叠的时段。
-
-    允许合法的空数组 ``[]``（当天没有需要明确列出的角色时段），返回空列表。
-    """
+    """解析基础数组协议输出；只接受协议字段、日内非跨午夜且互不重叠的时段。"""
     try:
         data = parse_json_response(text, require_closed_fence=True)
     except ValueError as exc:
         raise ScheduleValidationError("输出不是合法 JSON") from exc
     if not isinstance(data, list):
         raise ScheduleValidationError("顶层必须是数组")
-    max_slots = max(1, min(48, int(max_slots)))
-    if len(data) > max_slots:
-        raise ScheduleValidationError("时段数量超出上限")
+    # max_slots 是提示词层「期望值」而非硬上限：此处只保留固定防失控安全上限。
+    _safety_cap = 60
+    if len(data) > _safety_cap:
+        raise ScheduleValidationError(f"时段数量超出安全上限（{_safety_cap}）")
 
     slots = [_validate_slot(item) for item in data]
     return normalize_daily_slots(slots)
 
 
 def _candidate_summary(candidate: dict, index: int) -> dict:
-    """把单个候选压成结构化摘要（judge 输入）。
-
-    候选不携带角色状态——当日边界是共享参考（judge 输入显式给出），不是
-    候选专属字段。摘要只含时段结构与状态指纹，让 judge 按「候选↔边界」
-    对照评审，避免共享边界冒充候选数据。
-    """
+    """把单个候选压成结构化摘要（judge 输入；候选不携带角色状态，避免共享边界冒充候选数据）。"""
     slots = candidate.get("slots") or []
     summary = []
     for slot in slots:
@@ -254,45 +200,27 @@ def _candidate_summary(candidate: dict, index: int) -> dict:
     }
 
 
-# ---------------- 候选日程 ↔ 日界状态 连续性（确定性/启发式） ----------------
-#
-# 候选自身不携带日界状态：Step1 当日边界是所有候选共享的「当日开始时」
-# 参考，不是候选专属字段，绝不能与自身比较。因此连续性以候选 slots 的
-# name/state/时间结构为输入，对 boundary 各维度做粗粒度匹配——同一
-# boundary 下不同候选会得到不同惩罚。
-#
-# 诚实可审计策略：
-# - 文本维度（daily_theme / physical_state / unfinished_plans）做关键词
-#   归一化匹配，结果用 0..1 的冲突分表达，不做精确数值换算；
-# - 数值维度（energy / sleep_debt / focus / social_energy / motivation）
-#   只在「耗尽/异常」区间启用粗粒度冲突规则（高消耗日程占比 vs 恢复型
-#   日程占比），其余/缺失一律中性 0.5，不伪造精确度。
+# 候选不携带日界状态（Step1 边界是候选共享参考）；文本维度关键词归一化匹配，数值维度只在耗尽区间启用粗粒度规则，缺失一律中性 0.5。
 
-# 恢复类时段关键词（低消耗 / 恢复性活动）
 _RECOVERY_KEYWORDS = (
     "睡眠", "午休", "小憩", "休息", "放松", "独处", "静养", "冥想",
     "打盹", "歇", "疗养", "休整", "安静", "散步",
 )
-# 高消耗/要求类时段关键词（任务、训练、执勤、认知、创作等）
 _DEMAND_KEYWORDS = (
     "训练", "执勤", "巡逻", "战斗", "任务", "工作", "会议", "学习", "作业",
     "加班", "冲刺", "演习", "值班", "运动", "健身", "跑步", "创作", "写作",
     "备课", "研究", "项目", "高强度", "忙碌", "专注",
 )
-# 社交类时段关键词
 _SOCIAL_KEYWORDS = (
     "社交", "聚会", "聊天", "团建", "会客", "拜访", "接待", "约会",
     "陪伴", "群聊", "见面", "出门",
 )
-# 低能量恢复主题关键词（期望日程以休息/恢复为主）
 _LOW_THEME_KEYWORDS = (
     "低能量", "恢复", "休息", "放松", "休整", "调养", "疗愈", "悠闲",
 )
-# 高消耗主题关键词（期望日程有明确任务/执勤）
 _HIGH_THEME_KEYWORDS = (
     "繁忙", "执勤", "任务", "高强度", "紧张", "冲刺", "专注", "战斗", "工作", "忙碌",
 )
-# 身体状态「不适/疲劳」关键词（期望日程避免高强度）
 _PHYSICAL_STRESS_KEYWORDS = (
     "酸痛", "疲惫", "疲劳", "不适", "疼痛", "虚弱", "疲乏", "损伤", "发烧",
 )
@@ -326,10 +254,10 @@ def _slot_demand(slot: dict) -> int:
     return 0
 
 
-def _aggregate_demand_fraction(slots: list[dict]) -> float:
-    """高消耗时段覆盖分钟数 / 全部覆盖分钟数（0..1）。"""
+def _aggregate_fraction(slots: list[dict], predicate) -> float:
+    """按 predicate 命中的时段覆盖分钟数 / 全部覆盖分钟数（0..1）。"""
     total = 0.0
-    demand = 0.0
+    matched = 0.0
     for slot in slots or []:
         minutes = _slot_minutes(slot) if isinstance(slot, dict) else None
         if not minutes:
@@ -339,28 +267,25 @@ def _aggregate_demand_fraction(slots: list[dict]) -> float:
         if length <= 0:
             continue
         total += length
-        if _slot_demand(slot) == 1:
-            demand += length
-    return demand / total if total > 0 else 0.0
+        if predicate(slot):
+            matched += length
+    return matched / total if total > 0 else 0.0
+
+
+def _aggregate_demand_fraction(slots: list[dict]) -> float:
+    """高消耗时段覆盖分钟数 / 全部覆盖分钟数（0..1）。"""
+    return _aggregate_fraction(slots, lambda slot: _slot_demand(slot) == 1)
 
 
 def _aggregate_social_fraction(slots: list[dict]) -> float:
     """社交类时段覆盖分钟数 / 全部覆盖分钟数（0..1）。"""
-    total = 0.0
-    social = 0.0
-    for slot in slots or []:
-        minutes = _slot_minutes(slot) if isinstance(slot, dict) else None
-        if not minutes:
-            continue
-        start, end = minutes
-        length = max(0, end - start)
-        if length <= 0:
-            continue
-        total += length
-        text = f"{slot.get('name', '')} {slot.get('state', '')}"
-        if any(keyword in text for keyword in _SOCIAL_KEYWORDS):
-            social += length
-    return social / total if total > 0 else 0.0
+    return _aggregate_fraction(
+        slots,
+        lambda slot: any(
+            keyword in f"{slot.get('name', '')} {slot.get('state', '')}"
+            for keyword in _SOCIAL_KEYWORDS
+        ),
+    )
 
 
 def _plan_covered(plan: str, slots: list[dict]) -> bool:
@@ -386,10 +311,7 @@ def _resolve_boundary_reference(
     today_boundary: dict | None,
     previous_day_state: dict | None,
 ) -> dict:
-    """选择连续性参考日界状态。
-
-    优先当日 Step1 边界评估产物；全 null/缺失时回退前一日 ``boundary_state``。
-    """
+    """选择连续性参考日界状态：优先当日 Step1 边界，全 null 时回退前一日 boundary_state。"""
     if isinstance(today_boundary, dict) and any(
         value is not None for value in today_boundary.values()
     ):
@@ -404,13 +326,7 @@ def _resolve_boundary_reference(
 
 
 def _boundary_continuity_penalty(slots: list[dict], boundary: dict) -> float:
-    """候选日程 ↔ 日界状态 的连续性惩罚（0..1，越低越连续）。
-
-    8 个维度（energy / sleep_debt / focus / social_energy / motivation /
-    physical_state / daily_theme / unfinished_plans）等权平均：
-    - 数值维度：只在耗尽/异常区间启用冲突规则，否则中性 0.5；
-    - 文本维度：主题/身体状态关键词归一化、未完成计划显式安排覆盖率。
-    """
+    """候选日程 ↔ 日界状态的连续性惩罚（0..1，8 维度等权平均，越低越连续）。"""
     if not isinstance(boundary, dict) or not boundary:
         return 0.5
 
@@ -469,28 +385,7 @@ def deterministic_score(
     today_boundary: dict | None = None,
     continuity_enabled: bool = True,
 ) -> float:
-    """无 LLM 的候选评分（确定性回退），分数越低越好。
-
-    两个分量（权重合计 1.0）：
-
-    1. 反重复（0.7）：与最近日程的平均结构相似度（0..1，越高越差）；
-    2. 状态连续性（0.3）：候选「时段结构」与日界状态的兼容程度。连续性
-       直接以候选 slots 的 name/state/时间结构对 boundary 各维度做粗粒度
-       匹配（``_boundary_continuity_penalty``），因此同一 boundary 下不同
-       候选会得到不同惩罚。参考状态优先使用当日 Step1 边界评估产物
-       （``today_boundary``），Step1 缺失时回退前一日 ``boundary_state``。
-
-       候选自身不携带 ``boundary_state``：Step1 当日边界是所有候选共享的
-       当日初始状态，不是候选专属字段，不能与自身比较。没有可比较边界时
-       连续性为中性 0.5。
-
-       ``continuity_enabled=False`` 时（``state_continuity_enabled`` 关闭）直接
-       返回反重复分量，不加入任何连续性常数项——排序只由反重复（或等价候选相关
-       已启用分量）决定，避免“给所有候选加常数后声称关闭”。
-
-    不包含覆盖完整性分量（2.0.0 计划 §2.4）：空、稀疏与完整日程公平竞争，
-    不能因覆盖较少而固定落败。
-    """
+    """无 LLM 的候选评分（分数越低越好）：反重复 0.7 + 状态连续性 0.3；continuity_enabled=False 时只返回反重复分量。"""
     slots = candidate.get("slots") or []
     score = 0.0
 
@@ -505,8 +400,7 @@ def deterministic_score(
         score += 0.7 * 0.5
 
     if not continuity_enabled:
-        # 状态连续性关闭：不执行 slots↔boundary 匹配，也不加 0.3×中性
-        # 常数项。分数仅含反重复分量，排序完全不受边界影响。
+        # 状态连续性关闭：不执行 slots↔boundary 匹配，也不加 0.3×中性常数项。
         return round(score, 4)
 
     boundary = _resolve_boundary_reference(
@@ -527,11 +421,7 @@ async def generate_daily_schedule(
     prompt: str,
     max_slots: int = 24,
 ) -> tuple[PlanningResult, str]:
-    """调用 Provider 并返回已经过数组协议校验的规划结果和原始文本。
-
-    2.0.0 起 Step2 统一数组协议：theme/boundary 已由 Step1 边界评估
-    （``evaluate_boundary``）独立产出，不再使用对象协议。
-    """
+    """调用 Provider 并返回已经过数组协议校验的规划结果和原始文本。"""
     response = await context.llm_generate(
         chat_provider_id=provider_id,
         prompt=prompt,
@@ -572,8 +462,7 @@ async def evaluate_boundary(
     return _validate_boundary_state(data)
 
 
-# judge 显式拿到角色状态后，必须按「候选时段结构 ↔ 角色状态」评判连续性；
-# 候选摘要自身不携带边界（共享当日状态不能冒充候选专属数据）。
+# judge 必须按「候选时段结构 ↔ 角色状态」评判连续性；候选摘要不携带边界。
 _JUDGE_BOUNDARY_INSTRUCTION = (
     "评审「状态连续性」时必须以上文输入的角色状态（TODAY_BOUNDARY，含 "
     "PREVIOUS_DAY_STATE 参考）为准，对照每个候选的时段结构逐条判断："
@@ -593,19 +482,9 @@ async def select_candidate_with_llm(
     recent_schedules_text: str = "",
     continuity_enabled: bool = True,
 ) -> int:
-    """使用 LLM 在候选中选择最自然且不重复的一个，返回其下标。
-
-    人设参考与最近日程参考按需进入 judge 输入（评审维度 1/3 依赖）；
-    所有数据块与生成请求同风格（``<TAG>`` + JSON，尖括号转义）。
-    失败（异常/非法输出）返回 -1，由调用方回退到确定性评分。
-    """
+    """使用 LLM 在候选中选择最自然且不重复的一个，返回其下标；失败返回 -1。"""
     if len(candidates) < 2:
         return 0
-
-    def _block(name: str, value: Any) -> str:
-        body = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        body = body.replace("<", "\\u003c").replace(">", "\\u003e")
-        return f"<{name}>\n{body}\n</{name}>"
 
     summaries = [
         _candidate_summary(candidate, index)
@@ -614,14 +493,14 @@ async def select_candidate_with_llm(
     judge_parts = []
     if str(persona_prompt or "").strip():
         judge_parts.append(
-            _block("PERSONA", {"content": str(persona_prompt).strip()})
+            json_block("PERSONA", {"content": str(persona_prompt).strip()})
         )
     judge_parts.append(prompt_hint)
     if str(recent_schedules_text or "").strip():
         judge_parts.append(
-            _block("RECENT_SCHEDULES", {"content": str(recent_schedules_text).strip()})
+            json_block("RECENT_SCHEDULES", {"content": str(recent_schedules_text).strip()})
         )
-    judge_parts.append(_block("CANDIDATES", summaries))
+    judge_parts.append(json_block("CANDIDATES", summaries))
     if continuity_enabled:
         # 只有状态连续性开启时才追加「候选↔边界」评判指令与边界语义。
         judge_parts.append(_JUDGE_BOUNDARY_INSTRUCTION)

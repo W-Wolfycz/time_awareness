@@ -1,34 +1,4 @@
-"""
-内置现实日历事件管理器
-
-负责 ``builtin_events.yaml`` 的读写与跨年重新生成。
-
-数据文件结构::
-
-    version: 1
-    year: 2026                    # 当前数据对应的公历年
-    generated_at: "2026-06-26 09:00:00"
-    enabled_categories:           # 当前数据使用的分类开关
-      - legal_holiday
-      - traditional
-      - solar_term
-    events:                       # 已生成的内置事件列表
-      - id: "builtin:legal_holiday:01-01:元旦"
-        category: legal_holiday
-        year: 2026
-        month: 1
-        day: 1
-        text: "元旦"
-        source: builtin
-
-设计要点：
-
-- **跨年自动重新生成**：``is_stale(year, categories)`` 检查年份或类别开关是否
-  与当前文件一致；不一致即触发 ``regenerate`` 并写回。
-- **regen 语义**：regen 即「重新初始化」——年内日历不变，所以 regen 永远生成
-  当前年份的完整列表，不做任何过滤、不保留用户对 builtin 的删除。
-- **分类开关变更**：开关变化时也算「过期」，触发重新生成。
-"""
+"""内置现实日历事件管理器：builtin_events.yaml 读写与跨年重生成；年份/分类开关变更触发 regen。"""
 
 import datetime
 import os
@@ -50,17 +20,11 @@ class BuiltinManager:
         self.data_dir = data_dir
         self._file = os.path.join(data_dir, BUILTIN_FILE_NAME)
 
-    # ==================== 路径 ====================
-
     def file_path(self) -> str:
         return self._file
 
-    # ==================== 读取 ====================
-
     def load_raw(self) -> dict:
         """加载原始数据。文件不存在或损坏返回空结构。"""
-        if not os.path.exists(self._file):
-            return self._empty_payload()
         data = load_mapping(self._file)
         if data is None:
             return self._empty_payload()
@@ -75,8 +39,6 @@ class BuiltinManager:
             "enabled_categories": [],
             "events": [],
         }
-
-    # ==================== 写入 ====================
 
     def save(self, year: int, events: list, categories: list) -> bool:
         """原子写入 builtin_events.yaml。"""
@@ -96,8 +58,6 @@ class BuiltinManager:
             logger.error(f"{tag()} ❌ 内置事件保存失败")
         return ok
 
-    # ==================== 业务方法 ====================
-
     def is_stale(self, year: int, categories: list) -> bool:
         """检查当前文件是否过期（年份或分类不匹配）。"""
         data = self.load_raw()
@@ -108,16 +68,10 @@ class BuiltinManager:
         return existing != desired
 
     def regenerate(self, year: int, categories: list) -> int:
-        """重新生成指定年份的内置事件并写入文件。
-
-        Returns:
-            生成的事件数量；保存失败返回 -1
-        """
+        """重新生成指定年份的内置事件并写入；保存失败返回 -1。"""
         events = generate_for_year(year, categories)
         if not events and categories:
-            # 生成结果为空且分类启用：通常是 chinese_calendar 未覆盖该年份。
-            # 不覆盖已有数据、保持 stale，库升级覆盖后下次扫描自动重试；
-            # 否则空结果会落盘并被 is_stale 视为新鲜，此后永久静默缺数据。
+            # 生成为空且分类启用（chinese_calendar 未覆盖该年）：保留旧数据、保持 stale，下次扫描重试
             logger.warning(
                 f"{tag()} ⚠️ 内置事件生成为空且分类已启用（可能 chinese_calendar "
                 f"未覆盖 {year} 年）：保留旧数据，下次扫描将重试"
@@ -133,10 +87,7 @@ class BuiltinManager:
         return len(events)
 
     def ensure_fresh(self, year: int, categories: list) -> int:
-        """如果文件过期则重新生成，否则直接返回当前事件数。
-
-        用于插件启动时调用：跨年或分类开关变更时自动 regen。
-        """
+        """过期则重新生成，否则返回当前事件数；供启动时调用。"""
         if self.is_stale(year, categories):
             return self.regenerate(year, categories)
         data = self.load_raw()

@@ -15,8 +15,7 @@ def strip_json_fence(text: str, *, require_closed: bool = False) -> str:
     closed = len(lines) >= 2 and lines[-1].strip().startswith("```")
     if require_closed and not closed:
         return cleaned
-    if lines and lines[0].strip().startswith("```"):
-        lines = lines[1:]
+    lines = lines[1:]
     if closed:
         lines = lines[:-1]
     return "\n".join(lines).strip()
@@ -28,12 +27,7 @@ def parse_json_response(
     allow_embedded_array: bool = False,
     require_closed_fence: bool = False,
 ) -> Any:
-    """解析 JSON；兼容模式可从说明文字中提取嵌入的 JSON 数组。
-
-    提取用 ``raw_decode`` 从每个 ``[`` 位置尝试解码：说明文字里的方括号
-    （如「示例：[1]」）不会让贪婪匹配跨段，字符串值内的括号也由 JSON
-    语法正确处理。
-    """
+    """解析 JSON；兼容模式用 raw_decode 从每个 [ 位置提取嵌入的 JSON 数组。"""
     cleaned = strip_json_fence(text, require_closed=require_closed_fence)
     try:
         return json.loads(cleaned)
@@ -48,3 +42,10 @@ def parse_json_response(
             except (json.JSONDecodeError, ValueError):
                 continue
         raise ValueError("响应中的 JSON 数组无效") from first_error
+
+
+def json_block(name: str, value) -> str:
+    """把 dict 序列化为 XML 数据块：<NAME>\n{json}\n</NAME>（尖括号转义防注入）。"""
+    body = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    body = body.replace("<", "\\u003c").replace(">", "\\u003e")
+    return f"<{name}>\n{body}\n</{name}>"

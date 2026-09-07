@@ -1,14 +1,4 @@
-"""农历感知——实时计算今日农历日期。
-
-与 ``workday_sensor`` 同型：无状态单例，``lunar_python`` 实时查。
-配置开关：``time_awareness.time_sensors`` 多选勾选 ``lunar``（农历，默认开）。
-
-返回格式：
-
-- ``describe``：用于 LLM 注入，``农历{干支年}{生肖}年{中文月}月{中文日}``，例 ``农历丙午马年六月初五``
-- ``describe_detailed``：用于 WebUI，拆成 ``lunar_year_chip``（``丙午🐴年``）/ ``lunar_month_day``（``五月廿六``），
-  其中生肖转 emoji 方便 chip 内呈现
-"""
+"""农历感知：实时计算今日农历；无状态单例，lunar_python 实时查。"""
 
 import datetime
 
@@ -58,16 +48,7 @@ class LunarSensor:
         return self.collect(date)[0]
 
     def describe_detailed(self, date: datetime.date) -> dict:
-        """WebUI 用的结构化农历数据。
-
-        返回 dict：
-
-        - ``lunar_year_chip``：``{干支}{生肖 emoji}年``，例 ``丙午🐴年``
-        - ``lunar_month_day``：``{中文月}月{中文日}``，例 ``五月廿六``
-
-        异常或库未安装时返回 ``{"lunar_year_chip": "", "lunar_month_day": ""}``，
-        前端据此省略 chip。
-        """
+        """WebUI 用结构化农历数据；异常或库未安装返回空字段。"""
         return self.collect(date)[1]
 
 

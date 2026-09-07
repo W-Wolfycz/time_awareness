@@ -1,28 +1,18 @@
-"""AI 每日日程的一次生成用例。
-
-负责 Provider、Persona、结构化事实、增强上下文、Prompt 与输出协议；
-不负责 persona/date 幂等、锁、重试、后台任务或快照持久化（由
-``DailyScheduleService`` 负责）。
-
-支持自适应流水线：多候选并行（受并发闸门限制）、
-可选 LLM 评选、最近日程相似度检测与定向重生成。2.0.0 起 Step2 统一数组
-协议（theme/boundary_state 由 Step1 边界评估独立产出，对象协议已移除）。
-关闭全部增强项时退化为一次基础规划调用。
-"""
+"""AI 每日日程的一次生成用例（Provider/Persona/事实/增强上下文/Prompt/输出协议）。"""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from ..domain.schedule import schedule_similarity
+from ..domain.schedule import _CONTROL_CHARS, ai_daily_config, schedule_similarity
 from ..integrations.persona_resolver import extract_persona_prompt, resolve_effective_persona
 from ..constants import DEFAULT_DAILY_SCHEDULE_SYSTEM_PROMPT
 from ..log import logger, tag
 from ..llm.daily_schedule_generator import (
+    json_block,
     PlanningResult,
     ScheduleValidationError,
     deterministic_score,
@@ -43,15 +33,9 @@ from .adaptive_policy import (
 )
 
 
-PROMPT_REVISION = "daily_schedule_v6"
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+PROMPT_REVISION = "daily_schedule_v11"
 
-# AI 日程所有“重试语义”LLM 循环的统一退避序列（秒）：第 1 次尝试不等待，
-# 之后 5s、30s，超出封顶 30s——与 ``DailyScheduleService._generate_with_retries``
-# docstring 的 0/5/30s 契约一致。统一覆盖 Step1 边界评估、单候选规划、多候选
-# 每个候选、LLM judge 与反重复重生成内部的失败重试；不用于已成功返回的候选、
-# 纯本地 fallback 或任何非重试路径。通过可注入 ``sleep`` 实现，测试注入 fake
-# 避免真实等待。
+# 所有“重试语义”LLM 循环的统一退避序列（秒）：0/5/30s，超出封顶 30s；通过可注入 sleep 实现。
 _RETRY_BACKOFF_SECONDS = (0.0, 5.0, 30.0)
 
 
@@ -88,9 +72,8 @@ class DailyScheduleGenerationError(RuntimeError):
         self.error_type = error_type
         self.user_message = message
         self.retryable = retryable
-        # 本次 attempt 内已实际发起的逻辑 LLM 调用数，仅用于诊断日志。
         self.calls_executed = int(calls_executed or 0)
-        # 底层异常全文（单行化，不截断），用于失败日志与失败记录。
+        # 底层异常全文（已单行化），用于失败日志/记录。
         self.detail = str(detail or "").strip()
 
 
@@ -143,11 +126,7 @@ class DailyScheduleGeneration:
 
     def _ai_daily_config(self) -> dict:
         """返回 ``daily_schedule.ai_daily`` 原始配置（无旧分组语义的新键）。"""
-        daily = self.config.get("daily_schedule", {}) if isinstance(self.config, dict) else {}
-        if not isinstance(daily, dict):
-            return {}
-        ai_daily = daily.get("ai_daily", {})
-        return ai_daily if isinstance(ai_daily, dict) else {}
+        return ai_daily_config(self.config)
 
     def _adaptive_config(self) -> dict:
         """返回 ``daily_schedule.ai_daily.adaptive`` 原始配置（池归属自适应分组）。"""
@@ -207,13 +186,7 @@ class DailyScheduleGeneration:
         persona: Any | None = None,
         forecast: dict | None = None,
     ) -> GeneratedDailySchedule:
-        """生成当天日程。
-
-        ``persona`` 由 service 层在解析身份时同一次解析得到并传入，保证
-        快照归属与注入内容同源；未传入时（独立使用/测试）内部回退自行解析。
-        ``forecast`` 为目标日的天气基调预报（如存在），注入 Step2 供
-        天气自适应排日程（保持弹性表述，见提示词条款）。
-        """
+        """生成当天日程；persona 由 service 层同源传入，forecast 为目标日天气基调。"""
         policy = await self.policy()
         enhanced = enhanced or EnhancedContext()
         provider_id = await self._resolve_provider_id(session)
@@ -227,8 +200,7 @@ class DailyScheduleGeneration:
         # Step1：角色状态评估（当日初始 boundary），失败降级不阻塞排日程
         calls_executed = 0
         skipped: list[str] = []
-        # Step1 边界评估仅在「状态连续性」开启时执行：关闭时既不调用
-        # boundary LLM，也不注入 TODAY_BOUNDARY，更不让连续性影响评分。
+        # Step1 边界评估仅在「状态连续性」开启时执行。
         if policy.enabled and policy.state_continuity_enabled:
             today_boundary, boundary_calls, boundary_skipped = (
                 await self._evaluate_today_boundary(
@@ -254,8 +226,7 @@ class DailyScheduleGeneration:
                     f"skipped={','.join(boundary_skipped) or '-'}"
                 )
         elif not policy.state_continuity_enabled:
-            # 连续性关闭：防御性压制调用方/测试注入的边界数据，确保
-            # Step2 prompt、judge 与评分路径都不会拿到边界语义。
+            # 连续性关闭：压制调用方/测试注入的边界数据。
             enhanced = dc_replace(
                 enhanced,
                 today_boundary=None,
@@ -316,54 +287,25 @@ class DailyScheduleGeneration:
                 anti_repeat=None,
                 forecast=forecast,
             )
-            anti_repeat = None
-            if (
-                policy.enabled
-                and policy.use_recent_schedules
-                and enhanced.recent_snapshots
-                and self._is_repeat(result.slots, enhanced.recent_snapshots)
-            ):
-                logger.debug(f"{tag()} 单候选与最近日程相似度过高，定向重生成")
-                anti_repeat = self._anti_repeat_instruction(enhanced)
-                try:
-                    result, executed2, extra2 = await self._plan_once(
-                        provider_id=provider_id,
-                        persona_prompt=persona_prompt,
-                        sensors=sensors,
-                        now=now,
-                        policy=policy,
-                        enhanced=enhanced,
-                        anti_repeat=anti_repeat,
-                        forecast=forecast,
-                    )
-                except DailyScheduleGenerationError as exc:
-                    # 反重复重生成最终失败：保留原合法候选（计划 §4.3）
-                    extra_skipped = extra_skipped + ["antirepeat:failed"]
-                    anti_repeat = None
-                    logger.debug(
-                        f"{tag()} 反重复重生成失败，保留原合法候选: {exception_detail(exc)}"
-                    )
-                else:
-                    executed += executed2
-                    extra_skipped = extra_skipped + extra2
-            return result, executed, extra_skipped, anti_repeat
-
-        result, executed, extra_skipped = await self._plan_candidates(
-            provider_id=provider_id,
-            persona_prompt=persona_prompt,
-            sensors=sensors,
-            now=now,
-            policy=policy,
-            enhanced=enhanced,
-            forecast=forecast,
-        )
+            repeat_message = "单候选与最近日程相似度过高，定向重生成"
+        else:
+            result, executed, extra_skipped = await self._plan_candidates(
+                provider_id=provider_id,
+                persona_prompt=persona_prompt,
+                sensors=sensors,
+                now=now,
+                policy=policy,
+                enhanced=enhanced,
+                forecast=forecast,
+            )
+            repeat_message = "多候选结果与最近日程相似度过高，定向重生成"
         anti_repeat = None
         if (
             policy.use_recent_schedules
             and enhanced.recent_snapshots
             and self._is_repeat(result.slots, enhanced.recent_snapshots)
         ):
-            logger.debug(f"{tag()} 多候选结果与最近日程相似度过高，定向重生成")
+            logger.debug(f"{tag()} {repeat_message}")
             anti_repeat = self._anti_repeat_instruction(enhanced)
             try:
                 result, executed2, extra2 = await self._plan_once(
@@ -446,8 +388,7 @@ class DailyScheduleGeneration:
     def _is_repeat(self, slots: list[dict], recent_snapshots: tuple[dict, ...]) -> bool:
         signature = self._structure_signature(slots)
         for snapshot in recent_snapshots:
-            # 结构级反重复：段落的 (start,end) 序列与最近某天的 AI 原始输出
-            # 完全相同即判重复（治「三餐+午休骨架复读」）；空日程不参与。
+            # 结构级反重复：段落的 (start,end) 序列与最近某天完全相同即判重复；空日程不参与。
             if signature and self._structure_signature(
                 snapshot.get("ai_slots") or snapshot.get("slots") or []
             ) == signature:
@@ -514,14 +455,7 @@ class DailyScheduleGeneration:
         )
 
         async def _one(index: int) -> tuple[dict | None, int, str]:
-            """返回 (候选或 None, 实际发起的 LLM 调用数, 首个失败详情)。
-
-            并发槽超时不发起调用（attempted=False）；发起但失败仍计入调用。
-            候选只携带 ``slots``，不携带角色状态——Step1 当日边界是所有
-            候选共享的当日初始状态，不是候选专属字段。确定性/启发式连续性
-            评分与 LLM judge 都以候选 slots 对边界（enhanced.today_boundary
-            或前一日 boundary_state）匹配，见 ``deterministic_score``。
-            """
+            """返回 (候选或 None, LLM 调用数, 首个失败详情)；候选只携带 slots。"""
             calls = 0
             first_error = ""
             for attempt in range(policy.max_attempts):
@@ -565,8 +499,7 @@ class DailyScheduleGeneration:
             )
 
         chosen: dict
-        # continuity_enabled 透传：关闭时 judge 不带边界指令，deterministic
-        # 回退也只按反重复分量排序（不做 slots↔boundary 匹配）。
+        # continuity_enabled 透传：关闭时 judge 不带边界指令，deterministic 回退只按反重复排序。
         if judge and len(valid) > 1:
             choice, judge_calls = await self._judge(
                 provider_id=provider_id,
@@ -656,24 +589,19 @@ class DailyScheduleGeneration:
         *,
         continuity_enabled: bool = True,
     ) -> str:
-        """把角色状态显式交给 judge，让它按「候选时段结构 ↔ 边界状态」评审。
-
-        当日边界（Step1 边界评估产物）优先；Step1 缺失时昨日状态仍作为参考。
-        与生成请求同风格（``<TAG>`` + JSON 块）。``state_continuity_enabled=False``
-        时返回空串，judge 不携带任何边界语义（只按候选自身内容与反重复倾向评选）。
-        """
+        """把角色状态交给 judge 按「候选结构 ↔ 边界状态」评审；连续性关闭时返回空串。"""
         if not continuity_enabled:
             return ""
         parts = []
         if enhanced.today_boundary:
             parts.append(
-                DailyScheduleGeneration._json_block(
+                json_block(
                     "TODAY_BOUNDARY", enhanced.today_boundary
                 )
             )
         if enhanced.previous_day_state:
             parts.append(
-                DailyScheduleGeneration._json_block(
+                json_block(
                     "PREVIOUS_DAY_STATE", enhanced.previous_day_state
                 )
             )
@@ -723,7 +651,7 @@ class DailyScheduleGeneration:
         recent_snapshots = enhanced.recent_snapshots
 
         if enhanced.previous_day_state:
-            full_block = self._json_block(
+            full_block = json_block(
                 "PREVIOUS_DAY_STATE", enhanced.previous_day_state
             )
             full_tokens = estimate_text_tokens(full_block)
@@ -737,7 +665,7 @@ class DailyScheduleGeneration:
                 )
                 if previous_day_state:
                     used += estimate_text_tokens(
-                        self._json_block("PREVIOUS_DAY_STATE", previous_day_state)
+                        json_block("PREVIOUS_DAY_STATE", previous_day_state)
                     )
                     skipped.append("previous_day_state:truncated")
                 else:
@@ -751,7 +679,7 @@ class DailyScheduleGeneration:
             )
             if recent_text:
                 used += estimate_text_tokens(
-                    self._json_block("RECENT_SCHEDULES", {"content": recent_text})
+                    json_block("RECENT_SCHEDULES", {"content": recent_text})
                 )
                 if recent_text != enhanced.recent_schedules_text:
                     skipped.append("recent_schedules:truncated")
@@ -834,14 +762,14 @@ class DailyScheduleGeneration:
             "boundary_state": value.get("boundary_state", {}),
             "boundary_date": str(value.get("boundary_date", "") or ""),
         }
-        if estimate_text_tokens(cls._json_block("PREVIOUS_DAY_STATE", core)) > budget:
+        if estimate_text_tokens(json_block("PREVIOUS_DAY_STATE", core)) > budget:
             return None
         schedules = value.get("actual_schedules", [])
         if not isinstance(schedules, list) or not schedules:
             return core
         candidate = {**core, "actual_schedules": []}
         if estimate_text_tokens(
-            cls._json_block("PREVIOUS_DAY_STATE", candidate)
+            json_block("PREVIOUS_DAY_STATE", candidate)
         ) > budget:
             return core
         # 优先保留最近几天（列表为 旧→新，先倒序保留最近，再恢复顺序）
@@ -851,7 +779,7 @@ class DailyScheduleGeneration:
                 continue
             candidate = {**core, "actual_schedules": [*kept, entry]}
             if estimate_text_tokens(
-                cls._json_block("PREVIOUS_DAY_STATE", candidate)
+                json_block("PREVIOUS_DAY_STATE", candidate)
             ) > budget:
                 break
             kept.append(entry)
@@ -871,7 +799,7 @@ class DailyScheduleGeneration:
         kept = []
         for entry in entries:
             candidate = json.dumps([*kept, entry], ensure_ascii=False, sort_keys=True)
-            block = cls._json_block("RECENT_SCHEDULES", {"content": candidate})
+            block = json_block("RECENT_SCHEDULES", {"content": candidate})
             if estimate_text_tokens(block) > budget:
                 break
             kept.append(entry)
@@ -880,12 +808,7 @@ class DailyScheduleGeneration:
     # ---------------- Provider / Persona ----------------
 
     async def _resolve_provider_id(self, session: str) -> str:
-        """解析 AI 日程生成使用的 Provider（2.0.0 计划 §4）。
-
-        固定顺序：``daily_schedule.ai_daily.provider_id`` → AstrBot 全局
-        ``provider_settings.default_provider_id``。不从 UMO 猜测，也不尝试
-        读取某个会话临时 Provider（会话隔离偏好不影响日程生成）。
-        """
+        """解析生成 Provider：ai_daily.provider_id → 全局 default_provider_id。"""
         generation_config = self._generation_config()
         provider_id = str(generation_config.get("provider_id", "") or "").strip()
         if not provider_id:
@@ -909,11 +832,7 @@ class DailyScheduleGeneration:
         return provider_id
 
     async def _resolve_persona_prompt(self, session: str, persona: Any | None) -> str:
-        """从 persona 对象提取 prompt。
-
-        优先使用 service 层同一次解析得到的 persona（与身份归属同源）；
-        未传入时（独立使用/测试）回退自行解析。
-        """
+        """从 persona 提取 prompt；未传入时回退自行解析。"""
         generation_config = self._generation_config()
         if not generation_config.get("use_persona", True):
             return ""
@@ -931,12 +850,6 @@ class DailyScheduleGeneration:
         text = _CONTROL_CHARS.sub(" ", str(value or "")).strip()
         return text[:limit] if limit is not None else text
 
-    @staticmethod
-    def _json_block(name: str, value: Any) -> str:
-        body = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        body = body.replace("<", "\\u003c").replace(">", "\\u003e")
-        return f"<{name}>\n{body}\n</{name}>"
-
     # ---------------- Step1：角色状态评估 ----------------
 
     async def _evaluate_today_boundary(
@@ -948,11 +861,7 @@ class DailyScheduleGeneration:
         now,
         enhanced: EnhancedContext,
     ) -> tuple[dict | None, int, list[str]]:
-        """评估当日初始日界状态（Step1）。
-
-        输入：前一个可用日界状态 + 最近连续实际日程（含用户修改）+ 当日传感器。
-        失败时降级返回 None（Step2 无边界参考照常排日程），不阻塞生成。
-        """
+        """评估当日初始日界状态（Step1）；失败降级返回 None，不阻塞生成。"""
         prompt = self._build_boundary_prompt(
             now=now,
             persona_prompt=persona_prompt,
@@ -996,11 +905,7 @@ class DailyScheduleGeneration:
         boundary: dict,
         enhanced: EnhancedContext,
     ) -> dict:
-        """回填缺失维度：未输出的维度沿用上次角色状态值，首次为 null。
-
-        「全部无变化」时模型会输出空对象 ``{}``——它同样是稀疏输出，必须
-        走同一回填路径继承上次状态，否则连续性链会断。
-        """
+        """回填缺失维度：沿用上次角色状态值，首次为 null；空对象同样走回填继承。"""
         if not isinstance(boundary, dict):
             return {}
         previous = (enhanced.previous_day_state or {}).get("boundary_state") or {}
@@ -1021,11 +926,7 @@ class DailyScheduleGeneration:
         sensors: dict,
         enhanced: EnhancedContext,
     ) -> str:
-        """Step1 输入：日期/世界观/人设/传感器 + 最近可用边界 + 实际时间线。
-
-        边界取回溯到的最近一个非空角色状态；实际时间线自该边界日起
-        （空边界分支为整个参考窗口）携带，含用户修改与静态兜底。
-        """
+        """Step1 输入：日期/世界观/人设/传感器 + 最近可用边界 + 实际时间线。"""
         generation_config = self._generation_config()
         worldview = self._safe_reference(
             generation_config.get("worldview", ""),
@@ -1042,7 +943,7 @@ class DailyScheduleGeneration:
             if isinstance(entry, dict)
         ]
         blocks = [
-            self._json_block(
+            json_block(
                 "DATE_CONTEXT",
                 {
                     "local_date": now.date().isoformat(),
@@ -1051,8 +952,8 @@ class DailyScheduleGeneration:
                     "generated_at_local": now.strftime("%Y-%m-%d %H:%M:%S"),
                 },
             ),
-            self._json_block("WORLDVIEW", {"content": worldview}),
-            self._json_block(
+            json_block("WORLDVIEW", {"content": worldview}),
+            json_block(
                 "PERSONA_REFERENCE",
                 {
                     "enabled": bool(generation_config.get("use_persona", True)),
@@ -1060,17 +961,17 @@ class DailyScheduleGeneration:
                     "content": self._safe_reference(persona_prompt),
                 },
             ),
-            self._json_block("SENSORS", sensors),
+            json_block("SENSORS", sensors),
         ]
         if previous_boundary:
-            blocks.append(self._json_block("PREVIOUS_BOUNDARY", previous_boundary))
+            blocks.append(json_block("PREVIOUS_BOUNDARY", previous_boundary))
         if actual_schedules:
-            blocks.append(self._json_block("ACTUAL_SCHEDULES", actual_schedules))
+            blocks.append(json_block("ACTUAL_SCHEDULES", actual_schedules))
         theme_pool = self._theme_pool()
         if theme_pool:
             allow_custom = self._allow_custom_theme()
             blocks.append(
-                self._json_block(
+                json_block(
                     "THEME_POOL",
                     {
                         "pool": theme_pool,
@@ -1089,7 +990,7 @@ class DailyScheduleGeneration:
         if style_pool:
             allow_custom = self._allow_custom_theme()
             blocks.append(
-                self._json_block(
+                json_block(
                     "STYLE_POOL",
                     {
                         "pool": style_pool,
@@ -1106,7 +1007,7 @@ class DailyScheduleGeneration:
         recent_themes = self._recent_themes(enhanced)
         if recent_themes:
             blocks.append(
-                self._json_block(
+                json_block(
                     "RECENT_THEMES",
                     {
                         "instruction": "以下最近 N 天实际使用过的主题与状态色彩仅作反重复参考："
@@ -1136,32 +1037,30 @@ class DailyScheduleGeneration:
         worldview = self._safe_reference(
             generation_config.get("worldview", ""),
         )
-        static_slots = []
-        for item in daily_schedule.get("schedule_templates") or []:
-            if not isinstance(item, dict):
-                continue
-            static_slots.append(
-                {
-                    "name": self._safe_reference(item.get("name", ""), limit=24),
-                    "start": self._safe_reference(item.get("start_time", ""), limit=5),
-                    "end": self._safe_reference(item.get("end_time", ""), limit=5),
-                    "state": self._safe_reference(item.get("state_prompt", ""), limit=500),
-                }
-            )
+        static_slots = [
+            {
+                "name": self._safe_reference(item.get("name", ""), limit=24),
+                "start": self._safe_reference(item.get("start_time", ""), limit=5),
+                "end": self._safe_reference(item.get("end_time", ""), limit=5),
+                "state": self._safe_reference(item.get("state_prompt", ""), limit=500),
+            }
+            for item in daily_schedule.get("schedule_templates") or []
+            if isinstance(item, dict)
+        ]
         timezone = str(now.tzinfo) if now.tzinfo is not None else str(now.astimezone().tzinfo or "system-local")
         blocks = [
-            self._json_block(
+            json_block(
                 "DATE_CONTEXT",
                 {
                     "local_date": now.date().isoformat(),
                     "weekday": now.strftime("%A"),
                     "timezone": timezone,
                     "generated_at_local": now.strftime("%Y-%m-%d %H:%M:%S"),
-                    "max_slots": self.max_slots(),
+                    "target_slots": self.max_slots(),
                 },
             ),
-            self._json_block("WORLDVIEW", {"content": worldview}),
-            self._json_block(
+            json_block("WORLDVIEW", {"content": worldview}),
+            json_block(
                 "PERSONA_REFERENCE",
                 {
                     "enabled": bool(generation_config.get("use_persona", True)),
@@ -1169,26 +1068,24 @@ class DailyScheduleGeneration:
                     "content": self._safe_reference(persona_prompt),
                 },
             ),
-            self._json_block("SENSORS", sensors),
+            json_block("SENSORS", sensors),
         ]
-        # 增强上下文（已在 service 层按预算裁剪）
-        # 只有状态连续性开启时才注入 TODAY_BOUNDARY（generate() 已压制，
-        # 此处双重保险，防止任何调用方绕过 generate() 直接构造 prompt）。
+        # 增强上下文已在 service 层裁剪；只有连续性开启才注入 TODAY_BOUNDARY（双重保险）。
         if enhanced.today_boundary and policy.state_continuity_enabled:
             blocks.append(
-                self._json_block("TODAY_BOUNDARY", enhanced.today_boundary)
+                json_block("TODAY_BOUNDARY", enhanced.today_boundary)
             )
         if enhanced.recent_schedules_text:
             blocks.append(
-                self._json_block("RECENT_SCHEDULES", {"content": enhanced.recent_schedules_text})
+                json_block("RECENT_SCHEDULES", {"content": enhanced.recent_schedules_text})
             )
         if forecast:
             blocks.append(
-                self._json_block(
+                json_block(
                     "WEATHER_FORECAST",
                     {
-                        "instruction": "目标日的天气基调（白天/夜间各一段），由系统规定、"
-                        "不存在现实冲突：可把基调落实到具体时段——如白天「小雨」可只安排"
+                        "instruction": "目标日的天气基调（白天/夜间各一段），是角色所在世界当天的天气，"
+                        "由系统规定、不存在现实冲突：可把基调落实到具体时段——如白天「小雨」可只安排"
                         "其中 1–2 个时段下雨、其余多云或阴；雨天安排室内、高温避开正午"
                         "外出；state 与天气保持一致，不得脱离基调自创其他天气。",
                         "date": self._safe_reference(forecast.get("fxDate", ""), limit=10),
@@ -1196,12 +1093,16 @@ class DailyScheduleGeneration:
                         "text_night": self._safe_reference(forecast.get("textNight", ""), limit=40),
                         "temp_max": self._safe_reference(forecast.get("tempMax", ""), limit=10),
                         "temp_min": self._safe_reference(forecast.get("tempMin", ""), limit=10),
+                        **({
+                            "variation": self._safe_reference(
+                                forecast.get("variation", ""), limit=60
+                            )
+                        } if forecast.get("variation") else {}),
                     },
                 )
             )
         if static_slots:
-            # 静态日程在两种优先级下都注入，让规划模型知道其存在；
-            # 是否可覆盖由块内 instruction 按配置说明。
+            # 静态日程在两种优先级下都注入；是否可覆盖由块内 instruction 说明。
             instruction = (
                 "以上静态日程仅作参考：你可以覆盖其中任何时段；"
                 "未覆盖的时段将由静态日程兜底填充。"
@@ -1211,7 +1112,7 @@ class DailyScheduleGeneration:
                 "其余时间请正常规划，不要因此留出不必要的空档。"
             )
             blocks.append(
-                self._json_block(
+                json_block(
                     "STATIC_SCHEDULE",
                     {
                         "instruction": instruction,
@@ -1220,5 +1121,5 @@ class DailyScheduleGeneration:
                 )
             )
         if anti_repeat:
-            blocks.append(self._json_block("ANTI_REPEAT", {"content": anti_repeat}))
+            blocks.append(json_block("ANTI_REPEAT", {"content": anti_repeat}))
         return "\n\n".join(blocks)

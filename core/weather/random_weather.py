@@ -1,10 +1,4 @@
-"""随机天气提供者：白天/黑夜各自按权重独立抽取，日期种子保证全天稳定。
-
-- 同一天恒定（种子=日期）：对话注入与生成预报永远一致，零「预报失准」。
-- 池子只放单段天气；白天与黑夜各自独立加权抽取（白天晴、夜里小雨是合法的）。
-- 基调由系统规定，AI 只负责把白天/黑夜基调落到具体时段（哪段下雨、哪段多云），
-  不脱离基调自创天气。
-"""
+"""随机天气：白天/黑夜各自独立加权抽取，日期种子保证全天恒定（预报=实况）。"""
 
 from __future__ import annotations
 
@@ -23,7 +17,6 @@ SCENARIOS: tuple[tuple[str, int], ...] = (
     ("雾", 3),
 )
 
-# 月度基准高温（℃）。
 _MONTH_BASE_HIGH = {
     1: 5, 2: 7, 3: 13, 4: 20, 5: 25, 6: 29,
     7: 32, 8: 31, 9: 27, 10: 21, 11: 14, 12: 8,
@@ -70,23 +63,19 @@ def _pick(rnd: random.Random, pool: tuple[tuple[str, int], ...]) -> str:
 def daily_weather_outline(
     date: datetime.date,
     pool: tuple[tuple[str, int], ...] | None = None,
+    salt: str = "",
 ) -> dict:
-    """返回当日两段基调：{text_day, text_night, temp_max, temp_min}。
-
-    ``pool`` 为空时使用内置默认权重池；调用方可用 ``parse_pool`` 传入用户配置。
-    """
+    """返回当日两段基调；pool 空时用内置默认池，salt 为实例盐（同盐内当天天气一致）。"""
     pool = pool or SCENARIOS
-    # 字符串播种实现历史上变过：用 sha256 派生显式 int 种子，保证跨 Python
-    # 版本/跨进程同一天天气恒定（「同日恒定」不依赖版本实现细节）。
+    # sha256 派生 int 种子，保证跨版本/跨进程同一天天气恒定
     seed = int.from_bytes(
-        hashlib.sha256(f"ta-random-weather-{date.isoformat()}".encode()).digest()[:8],
+        hashlib.sha256(f"ta-random-weather-{date.isoformat()}-{salt}".encode()).digest()[:8],
         "big",
     )
     rnd = random.Random(seed)
     text_day = _pick(rnd, pool)
     text_night = _pick(rnd, pool)
-    # 温度=月份基准 + 天气现象温差 + ±1°C 日抖动：同月同天气基本恒定，
-    # 相邻日温差只来自天气变化（晴转雨降 6-7°C 等自然幅度），无随机跳变。
+    # 温度=月份基准+天气温差+±1°C 抖动：同月同天气基本恒定，无随机跳变
     base_high = _MONTH_BASE_HIGH.get(date.month, 20)
     day_high = base_high + _WEATHER_TEMP_DELTA.get(text_day, 0) + rnd.randint(-1, 1)
     night_low = base_high - 7 + _WEATHER_TEMP_DELTA.get(text_night, 0) + rnd.randint(-1, 1)
@@ -96,4 +85,29 @@ def daily_weather_outline(
         "text_night": text_night,
         "temp_max": int(day_high),
         "temp_min": int(night_low),
+        "variation": _variation(rnd, text_day, text_night),
     }
+
+
+def _fmt_minute(minute: int) -> str:
+    minute = max(0, min(24 * 60 - 1, minute))
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def _variation(rnd: random.Random, text_day: str, text_night: str) -> str:
+    """确定性变化窗口：雷阵雨给随机 1-2h 窗口，转场给 17-20 点转场点，小雨给间歇表述。"""
+    if text_day == "雷阵雨":
+        start = 13 * 60 + rnd.randint(0, 240)  # 13:00-17:00 起，留足 1-2h 余量
+        duration = rnd.choice((60, 90, 120))
+        return f"{_fmt_minute(start)}-{_fmt_minute(start + duration)} 阵雨，其余多云"
+    if text_night == "雷阵雨":
+        start = 18 * 60 + rnd.randint(0, 180)  # 18:00-21:00 起
+        duration = rnd.choice((60, 90, 120))
+        return f"{_fmt_minute(start)}-{_fmt_minute(start + duration)} 阵雨，其余阴"
+    if text_night and text_night != text_day:
+        # 转场优先于「间歇小雨」：晴转小雨这类给明确转场点更有信息量
+        turn = 17 * 60 + rnd.randint(0, 180)  # 17:00-20:00
+        return f"{_fmt_minute(turn)} 前后转{text_night}"
+    if "小雨" in (text_day, text_night):
+        return "间歇性小雨，时断时续"
+    return ""

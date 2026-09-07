@@ -1,8 +1,4 @@
-"""结构化时间事实采集。
-
-传感器只在这里解释配置并采集事实；XML、AI 生成 JSON 和 Dashboard DTO 由
-各自的表现层渲染，避免把 ``<SYSTEM_REMINDER>`` 等格式反向当成业务数据。
-"""
+"""结构化时间事实采集；传感器只在这里解释配置并采集事实，格式渲染归各表现层。"""
 
 from __future__ import annotations
 
@@ -27,7 +23,6 @@ from ..utils.time_utils import get_now
 
 UNSPECIFIED_SCHEDULE_STATE = "无固定安排（按人设自然演绎）"
 
-# 多选 selector 的取值与内部分类常量的映射（配置存英文键，UI 用 labels 显示中文）
 SENSOR_SELECT_KEYS = frozenset({"workday", "lunar", "almanac"})
 
 BUILTIN_SELECT_CATEGORY_MAP = {
@@ -37,6 +32,8 @@ BUILTIN_SELECT_CATEGORY_MAP = {
     "political": CATEGORY_POLITICAL,
     "international": CATEGORY_INTERNATIONAL,
 }
+
+_LEGACY_BUILTIN_TRUE_DEFAULTS = frozenset({"legal_holidays", "traditional", "solar_terms"})
 
 
 @dataclass(frozen=True)
@@ -126,23 +123,20 @@ class TimeFactsCollector:
             return None
         return {str(v) for v in value if str(v) in SENSOR_SELECT_KEYS}
 
-    def workday_enabled(self) -> bool:
+    def _sensor_enabled(self, key: str, legacy_key: str, default: bool) -> bool:
         selection = self._time_sensor_selection()
         if selection is not None:
-            return "workday" in selection
-        return bool(self._time_config().get("workday_state_enabled", True))
+            return key in selection
+        return bool(self._time_config().get(legacy_key, default))
+
+    def workday_enabled(self) -> bool:
+        return self._sensor_enabled("workday", "workday_state_enabled", True)
 
     def lunar_enabled(self) -> bool:
-        selection = self._time_sensor_selection()
-        if selection is not None:
-            return "lunar" in selection
-        return bool(self._time_config().get("lunar_state_enabled", True))
+        return self._sensor_enabled("lunar", "lunar_state_enabled", True)
 
     def almanac_enabled(self) -> bool:
-        selection = self._time_sensor_selection()
-        if selection is not None:
-            return "almanac" in selection
-        return bool(self._time_config().get("almanac_enabled", False))
+        return self._sensor_enabled("almanac", "almanac_enabled", False)
 
     def last_chat_enabled(self) -> bool:
         return bool(self._time_config().get("last_chat_enabled", True))
@@ -162,18 +156,11 @@ class TimeFactsCollector:
         builtin_config = calendar_config.get("builtin_events", {})
         if not isinstance(builtin_config, dict):
             builtin_config = {}
-        result = []
-        if builtin_config.get("legal_holidays", True):
-            result.append(CATEGORY_LEGAL)
-        if builtin_config.get("traditional", True):
-            result.append(CATEGORY_TRADITIONAL)
-        if builtin_config.get("solar_terms", True):
-            result.append(CATEGORY_SOLAR_TERM)
-        if builtin_config.get("political", False):
-            result.append(CATEGORY_POLITICAL)
-        if builtin_config.get("international", False):
-            result.append(CATEGORY_INTERNATIONAL)
-        return result
+        return [
+            category
+            for key, category in BUILTIN_SELECT_CATEGORY_MAP.items()
+            if builtin_config.get(key, key in _LEGACY_BUILTIN_TRUE_DEFAULTS)
+        ]
 
     def today_events_text(self, *, now: datetime.datetime) -> str:
         calendar_config = self._calendar_config()
@@ -239,11 +226,7 @@ class TimeFactsCollector:
         now: datetime.datetime | None = None,
         include_last_chat: bool = True,
     ) -> TimeFacts:
-        """采集一个不可变的同一时刻快照。
-
-        ``scope`` 可为 ``conversation``、``persona_daily_generation`` 或
-        ``dashboard``。Persona 级生成作用域不会读取会话级上次对话信息。
-        """
+        """采集同一时刻不可变快照；Persona 级生成作用域不读取会话级上次对话。"""
         if scope not in {"conversation", "persona_daily_generation", "dashboard"}:
             raise ValueError(f"未知时间事实作用域: {scope}")
         now = now or self.now()

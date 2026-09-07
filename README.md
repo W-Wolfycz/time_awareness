@@ -43,7 +43,7 @@ AstrBot 主配置页采用渐进显示：日程、AI 日程、自适应增强、
 | `ai_daily.worldview` | 稳定世界观/长期背景，不等于每日 theme | `""` |
 | `ai_daily.max_attempts` | 每个独立 LLM 步骤的最大尝试次数（1–5，包含首次） | `3` |
 | `ai_daily.generation_time` | `HH:MM` 当天生成当天；`-HH:MM` 前一天提前生成次日 | `00:05` |
-| `ai_daily.max_slots` | AI 输出最大时段数 | `24` |
+| `ai_daily.max_slots` | AI 输出时段数的期望值（约这个数，非硬上限；超出 60 条被安全上限截断） | `24` |
 | `ai_daily.retention_days` | 所有 Persona 快照保留天数（包含当天） | `30` |
 | `ai_daily.adaptive.enabled` | 自适应总开关（见下文） | `false` |
 | `ai_daily.adaptive.recent_days` | 参考最近日程天数，并决定连续性回溯窗口；`0` 关闭（连续性窗口缺省 7 天），`1–30` 启用 | `0` |
@@ -77,7 +77,7 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 | `enable_calendar` | 注入当日事项 | `false` |
 | `ai_generate_provider_id` | `/calendar create` 使用的模型 | `""` |
 | `ai_generate_worldview` | 日历生成世界观/主题 | `""` |
-| `ai_generate_max_events` | `/calendar create` 单次生成事项条数上限（1–200） | `40` |
+| `ai_generate_max_events` | `/calendar create` 单次生成事项条数期望值（约这个数，非硬上限；超出 400 条被安全上限截断） | `40` |
 | `builtin_event_categories` | 内置现实事件分类多选：`legal_holidays` 法定节假日、`traditional` 传统节日、`solar_terms` 节气、`political` 政治纪念日、`international` 国际节日；勾选任意一项即启用内置现实事件，全部不选则关闭 | `["legal_holidays", "traditional", "solar_terms"]` |
 
 ### `reminder`
@@ -115,6 +115,7 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 ```xml
 <SYSTEM_REMINDER>当前日期时间：YYYY-MM-DD HH:MM（时区），星期X</SYSTEM_REMINDER>
 <SCHEDULE_STATE>当前命中的角色状态</SCHEDULE_STATE>
+<TODAY_SCHEDULE>今日时段安排摘要</TODAY_SCHEDULE>
 <WEATHER>今日天气基调</WEATHER>
 <WORKDAY_STATE>工作日性质</WORKDAY_STATE>
 <LUNAR_STATE>农历日期</LUNAR_STATE>
@@ -178,3 +179,7 @@ if star_meta and star_meta.star_cls:
 - 数据目录：`data/plugin_data/time_awareness/`，包括日历、提醒、上次对话时间和按需创建的 AI 日程快照/HMAC secret。AI 每日日程关闭时不会创建对应文件；快照不保存原始 Bot/用户/群 ID、Persona prompt 或对话历史。
 - WebUI 提供概览、日历、任务、「静态日程」与「人格日程」视图。静态日程使用分页紧凑列表和单一编辑弹窗，保存时以 revision 防止多页面互相覆盖。人格日程页可按 Persona/日期查看快照：已执行、AI 与静态日程卡片始终只读，用户通过新增/修改用户时段覆盖未来时间线（完全未来可改全部字段，跨冻结点尾段仅可改结束时间或删除）；保存请求只提交用户层，服务端按最新冻结点重新合并。人工修改后的日程不会被 AI 每日补生成覆盖（`/schedule regenerate` 可恢复 AI 版本），并作为次日「昨日实际日程」参与连续性规划。
 - Python ≥ 3.10；AstrBot `>=4.26.0,<5`；依赖 `pyyaml`、`chinese_calendar`、`lunar_python`，Windows 另按条件安装 `tzdata` 以支持 IANA 时区。
+
+## 从 v2.x 升级到 v3.0
+
+旧配置形态不再自动迁移（布尔开关→多选、两代 `ai_generation` 分组）；升级后请到配置页重设 AI 生成参数与传感器/内置事件多选；scheduler 任务文件旧 v1 标记不再解析；旧键会被 AstrBot 依 schema 自动清理。

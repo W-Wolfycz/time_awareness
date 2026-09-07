@@ -1,21 +1,13 @@
-"""天气传感器门面。
-
-当前提供者：随机天气（``core/weather/random_weather.py``，白天/黑夜各自加权抽取，
-权重池可用配置覆盖，默认池开箱即用、零网络）。
-
-对外接口：
-- ``enabled()``：``daily_schedule.ai_daily.random_weather_enabled``
-- ``current_weather()``：当日两段基调（对话注入一句话表述）
-- ``daily_forecast(date)``：目标日两段基调（生成注入用；同种子 → 预报=实况）
-- ``validate()``：即时成功（无网络），供 Plugin Page「查看今日天气」用
-"""
+"""天气传感器门面：随机天气（白天/黑夜加权抽取），提供 enabled/current_weather/daily_forecast/validate。"""
 
 from __future__ import annotations
 
 import datetime
+import secrets
 import time
-from typing import Any, Callable
+from typing import Callable
 
+from ._datafile import atomic_write_yaml, load_mapping
 from .weather.random_weather import daily_weather_outline, parse_pool
 
 
@@ -36,6 +28,8 @@ class WeatherSensor:
         raw_pool = (ai_daily or {}).get("weather_pool")
         self._pool = parse_pool(raw_pool if isinstance(raw_pool, list) else None)
         self._now = now_provider or self._default_now
+        self._data_dir = str(data_dir or "")
+        self._salt = self._ensure_instance_salt()
 
     @staticmethod
     def _default_now() -> float:
@@ -53,8 +47,22 @@ class WeatherSensor:
             return datetime.date.fromtimestamp(now)
         return datetime.date.today()
 
+    def _ensure_instance_salt(self) -> str:
+        """读取/生成实例盐：同数据目录共用，不同设备各自生成（同一天跨设备天气不同）。"""
+        if not self._data_dir:
+            return ""
+        path = f"{self._data_dir}/weather_cache.yaml"
+        cache = load_mapping(path)
+        if isinstance(cache, dict) and cache.get("instance_salt"):
+            return str(cache["instance_salt"])
+        salt = secrets.token_hex(8)
+        cache = cache if isinstance(cache, dict) else {}
+        cache["instance_salt"] = salt
+        atomic_write_yaml(path, cache, header="time_awareness weather cache")
+        return salt
+
     def _outline(self, date: datetime.date) -> dict:
-        return daily_weather_outline(date, pool=self._pool)
+        return daily_weather_outline(date, pool=self._pool, salt=self._salt)
 
     async def current_weather(self) -> dict | None:
         """当日两段基调；未启用返回 None（调用方省略 <WEATHER> 标签）。"""
@@ -73,6 +81,7 @@ class WeatherSensor:
             "textNight": outline["text_night"],
             "tempMax": str(outline["temp_max"]),
             "tempMin": str(outline["temp_min"]),
+            "variation": str(outline.get("variation", "") or ""),
         }
 
     async def validate(self) -> tuple[bool, str]:
@@ -93,4 +102,5 @@ class WeatherSensor:
         else:
             head = text_day or text_night
         tail = f"{low}~{high}°C" if low is not None and high is not None else ""
-        return "，".join(part for part in (head, tail) if part)
+        variation = str(data.get("variation", "") or "").strip()
+        return "，".join(part for part in (head, tail, variation) if part)

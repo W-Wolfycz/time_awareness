@@ -60,13 +60,21 @@ class ScheduleCommands:
     def _preview(value: str, limit: int = 40) -> str:
         return value if len(value) <= limit else value[: limit - 3] + "..."
 
+    def _static_slot_line(self, slot: dict, active: dict | None = None) -> str:
+        name = str(slot.get("name", "") or "").strip()
+        state = str(slot.get("state_prompt", "") or "").strip() or "(无状态描述)"
+        marker = " ← 当前" if slot is active else ""
+        return (
+            f"  {slot.get('start_time', '')}-{slot.get('end_time', '')}{marker}  "
+            f"{f'[{name}] ' if name else ''}{self._preview(state)}"
+        )
+
     def show(self, session: str) -> str:
         daily_schedule = self.config.get("daily_schedule", {})
         if not isinstance(daily_schedule, dict):
             daily_schedule = {}
         enabled = bool(daily_schedule.get("enable_schedule", False))
-        # 同步注册仅使用已缓存身份（入口通常已先 register_session_async）；未缓存时
-        # 本轮回退静态日程，下次消息到来时补生成。
+        # 同步注册仅使用已缓存身份；未缓存时本轮回退静态日程，下次消息补生成。
         self.daily_schedule_service.register_session(session)
         now = self._now()
         snapshot = self.daily_schedule_service.get_snapshot_for_session(session, now=now)
@@ -116,13 +124,7 @@ class ScheduleCommands:
                     + (f" · {detail}" if detail else "")
                 )
         for slot in sort_static_slots(slots):
-            name = str(slot.get("name", "") or "").strip()
-            state = str(slot.get("state_prompt", "") or "").strip() or "(无状态描述)"
-            marker = " ← 当前" if slot is active else ""
-            lines.append(
-                f"  {slot.get('start_time', '')}-{slot.get('end_time', '')}{marker}  "
-                f"{f'[{name}] ' if name else ''}{self._preview(state)}"
-            )
+            lines.append(self._static_slot_line(slot, active))
         return "\n".join(lines)
 
     def static(self) -> str:
@@ -135,12 +137,7 @@ class ScheduleCommands:
             return "[静态日程] 共 0 条。可在 time_awareness Plugin Page 添加静态日程时段。"
         lines = [f"[静态日程 共 {len(slots)} 条；AI 不会覆盖此配置]"]
         for slot in sort_static_slots(slots):
-            name = str(slot.get("name", "") or "").strip()
-            state = str(slot.get("state_prompt", "") or "").strip() or "(无状态描述)"
-            lines.append(
-                f"  {slot.get('start_time', '')}-{slot.get('end_time', '')}  "
-                f"{f'[{name}] ' if name else ''}{self._preview(state)}"
-            )
+            lines.append(self._static_slot_line(slot))
         return "\n".join(lines)
 
     async def regenerate(self, session: str, *, event=None) -> AsyncIterator[str]:
@@ -155,7 +152,13 @@ class ScheduleCommands:
             session, trigger=False, event=event
         )
         logger.debug(f"{tag()} /schedule regenerate 开始: session={session}")
-        yield "正在重新生成当前 Persona 的今日 AI 日程，请稍候……"
+        persona_name = await self.daily_schedule_service.resolve_session_persona_name(
+            session, event=event
+        )
+        if persona_name:
+            yield f"正在重新生成 Persona「{persona_name}」的今日 AI 日程，请稍候……"
+        else:
+            yield "正在重新生成当前 Persona 的今日 AI 日程，请稍候……"
         result = await self.daily_schedule_service.generate_for_session(session, force=True)
         if result.success:
             source_label = "纯 AI" if result.source == "ai" else "AI + 静态日程"

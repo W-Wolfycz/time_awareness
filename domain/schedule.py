@@ -1,25 +1,4 @@
-"""日程时段的统一领域规则。
-
-本模块不依赖 AstrBot、配置对象或持久化实现，是以下语义的唯一来源：
-
-- ``HH:MM`` 解析与 ``24:00`` 边界；
-- 左闭右开 ``[start, end)`` 命中；
-- 静态时段跨午夜展开；
-- 静态时段重叠检测；
-- AI 单日快照校验与静态日程稀疏合并（2.0.0 起动态合并见 timeline.py）。
-
-统一运行语义（P1 约定）：
-- 运行时午夜边界视为 ``00:00``：``minute_of_day`` 只返回 ``0..1439``，
-  ``24:00`` 永远不会被命中。
-- 配置里的 ``end_time=24:00`` 只表示不可抵达的右开端点（``1440``），
-  是合法右边界；起点 ``00:00`` 是唯一的午夜可命中时刻。
-- 静态跨午夜段（``start > end``，如 ``22:00→08:00``）在规范化/存储边界
-  拆成两个非跨日段：``[22:00, 当日结束)`` 与 ``[00:00, 08:00)``
-  （见 ``normalize_static_slots`` / ``split_cross_midnight``）。
-
-静态兜底允许跨午夜；AI 单日快照不允许跨午夜，但 ``end`` 可以为
-``24:00``。两种协议复用相同的分钟和值域规则，不共用宽松校验器。
-"""
+"""日程时段统一领域规则：左闭右开 [start,end)，24:00 仅作不可命中右边界，跨午夜拆两段。"""
 
 from __future__ import annotations
 
@@ -54,12 +33,7 @@ def parse_time(
     allow_24: bool = False,
     strict: bool = True,
 ) -> int:
-    """把时间文本解析为当天分钟数。
-
-    ``strict=False`` 仅用于用户配置解析（``schedule_templates`` 与
-    ``generation_time`` 允许省略前导零，如 ``8:00``）；AI 输出与保存协议
-    必须使用严格的两位小时 ``HH:MM``。
-    """
+    """把时间文本解析为当天分钟数；strict=False 仅用于用户配置解析（允许省略前导零）。"""
     if not isinstance(value, str):
         raise ScheduleValidationError("时间必须是字符串")
     match = (_STRICT_TIME_RE if strict else _LENIENT_TIME_RE).fullmatch(value.strip())
@@ -87,29 +61,34 @@ def minute_of_day(now: datetime.datetime) -> int:
     return now.hour * 60 + now.minute
 
 
-def split_cross_midnight(start: int, end: int) -> tuple[tuple[int, int], ...]:
-    """将静态时段展开为一个或两个日内非跨日区间；零长度返回空。
+def slot_minutes(slot: dict) -> tuple[int, int]:
+    """取时段 ``[start_minute, end_minute)``；优先用内部分钟字段，否则宽松解析文本。"""
+    if "_start_minute" in slot and "_end_minute" in slot:
+        try:
+            start = int(slot["_start_minute"])
+            end = int(slot["_end_minute"])
+            if start != end or "start" not in slot:
+                return start, end
+        except (TypeError, ValueError):
+            pass
+    # 宽松解析（接受 H:MM）：静态配置手填的 8:00 也参与渲染，不在渲染层静默丢弃。
+    start = parse_time(str(slot.get("start", "")), allow_24=False, strict=False)
+    end = parse_time(str(slot.get("end", "")), allow_24=True, strict=False)
+    return start, end
 
-    - ``start`` 必须是可命中时刻（``0..1439``；``24:00`` 不可命中所以拒绝）；
-    - ``end`` 可以是右开边界 ``1440``（即 ``24:00``，只表示不可抵达的右端
-      点，永远不会被命中）——此时是单段 ``[start, 1440)``；
-    - ``start < end``：单段 ``(start, end)``；
-    - ``start > end``：跨午夜，拆成 ``(start, 1440)`` 与 ``(0, end)`` 两段。
-    """
+
+def split_cross_midnight(start: int, end: int) -> tuple[tuple[int, int], ...]:
+    """将静态时段展开为一个或两个非跨日区间；零长度返回空（start 必须可命中，end 可为 1440）。"""
     if not (0 <= start < MINUTES_PER_DAY and 0 <= end <= MINUTES_PER_DAY):
         raise ScheduleValidationError("静态时段必须落在 00:00-24:00 且起点可命中")
     if start == end:
         return ()
     if start < end:
         return ((start, end),)
-    # ``end == 00:00`` 时第二段为空，不能把 ``[00:00, 00:00)``
-    # 作为一个真实时段带入时间线。
+    # end == 00:00 时第二段为空，不能把 [00:00,00:00) 带入时间线。
     return tuple(
         (range_start, range_end)
-        for range_start, range_end in (
-            (start, MINUTES_PER_DAY),
-            (0, end),
-        )
+        for range_start, range_end in ((start, MINUTES_PER_DAY), (0, end))
         if range_start < range_end
     )
 
@@ -189,18 +168,7 @@ def detect_static_overlaps(slots: Iterable[dict]) -> list[ScheduleOverlap]:
 
 
 def normalize_static_slots(slots: Iterable[dict]) -> list[dict]:
-    """把静态时段规范化为非跨日段（跨午夜拆两段）——规范化/存储边界。
-
-    输入兼容两种形态：配置源（``start_time``/``end_time``）与时间线槽位
-    （``start``/``end``）；``end`` 允许 ``24:00``（只作右开边界，不可命中）。
-    每个跨午夜段（``start > end``）拆成两个非跨日段：:
-
-        [start, 当日结束) 与 [00:00, end)
-
-    非法时段跳过。返回的槽位统一为 ``start``/``end``（HH:MM）加内部分钟
-    字段 ``_start_minute``/``_end_minute``，供命中/重叠/四层 timeline 共用，
-    避免各路径各自实现跨午夜语义。
-    """
+    """把静态时段规范化为非跨日段（跨午夜拆两段），非法时段跳过；供命中/重叠/四层 timeline 共用。"""
     result: list[dict] = []
     for slot in slots or []:
         if not isinstance(slot, dict):
@@ -282,12 +250,7 @@ def _minute_bitmap(slots: Iterable[dict]) -> tuple[set[int], int]:
 
 
 def schedule_similarity(a: Iterable[dict], b: Iterable[dict]) -> float:
-    """两份 AI 日程的确定性结构相似度（0..1）。
-
-    时段边界 + 名称 + 状态指纹的确定性检查，不调用 LLM。
-    1.0 表示完全重复，0.0 表示完全不同；``SIMILARITY_REPEAT_THRESHOLD``
-    以上的组合将被视为「与最近日程重复」。
-    """
+    """两份 AI 日程的确定性结构相似度（0..1），不调用 LLM。"""
     a_list = [item for item in (a or []) if isinstance(item, dict)]
     b_list = [item for item in (b or []) if isinstance(item, dict)]
     if not a_list or not b_list:
@@ -321,3 +284,47 @@ def schedule_similarity(a: Iterable[dict], b: Iterable[dict]) -> float:
     )
 
     return round(0.5 * time_jaccard + 0.3 * name_jaccard + 0.2 * state_jaccard, 4)
+
+
+# ==================== 配置读取（服务层共用，保持字节级一致） ====================
+
+
+def ai_daily_config(config: dict) -> dict:
+    """读取 ``daily_schedule.ai_daily`` 配置块；非 dict 回退空 dict。"""
+    daily = config.get("daily_schedule", {}) if isinstance(config, dict) else {}
+    daily = daily if isinstance(daily, dict) else {}
+    ai_daily = daily.get("ai_daily", {})
+    return ai_daily if isinstance(ai_daily, dict) else {}
+
+
+def ai_priority_over_static(config: dict) -> bool:
+    """读取 ``daily_schedule.ai_daily.ai_priority_over_static`` 开关（缺省 False）。"""
+    daily = config.get("daily_schedule", {}) if isinstance(config, dict) else {}
+    daily = daily if isinstance(daily, dict) else {}
+    return bool(daily.get("ai_daily", {}).get("ai_priority_over_static", False))
+
+
+def static_slots_from_config(config: dict) -> list[dict]:
+    """把 ``daily_schedule.schedule_templates`` 转为规范化静态时段（跨午夜拆段、剥离内部分钟字段）。"""
+    daily = config.get("daily_schedule", {}) if isinstance(config, dict) else {}
+    daily = daily if isinstance(daily, dict) else {}
+    value = daily.get("schedule_templates")
+    result = [
+        {
+            "name": str(item.get("name", "") or ""),
+            "start": str(item.get("start_time", "") or ""),
+            "end": str(item.get("end_time", "") or ""),
+            "state": str(item.get("state_prompt", "") or ""),
+            "origin": "static",
+        }
+        for item in (value if isinstance(value, list) else [])
+        if isinstance(item, dict)
+    ]
+    return [
+        {
+            key: item[key]
+            for key in ("name", "start", "end", "state", "origin")
+            if key in item
+        }
+        for item in normalize_static_slots(result)
+    ]

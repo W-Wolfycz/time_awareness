@@ -1,8 +1,4 @@
-"""ChatMemory takeover contexts 读取适配。
-
-只通过 ``context.get_registered_star`` 使用 ChatMemory 的公开实例 API，不直接导入
-对方插件模块。插件未安装、未激活、没有当前 conversation 或查询失败时均返回空列表。
-"""
+"""ChatMemory takeover contexts 读取适配；未安装/未启用/查询失败均返回空列表。"""
 
 from dataclasses import dataclass
 from typing import Any
@@ -22,11 +18,7 @@ class ChatMemoryContextState:
 
 
 def is_chat_memory_takeover_applied(event: Any) -> bool:
-    """判断 ChatMemory 是否已对当前 AstrBot LLM 请求实际执行接管。
-
-    ChatMemory 在接管出结果后写入事件级临时标记；严格接管即使历史为空也会写入。
-    读取失败时按未接管处理，避免影响时间上下文主链。
-    """
+    """判断 ChatMemory 是否已接管当前请求；读取失败按未接管处理。"""
     try:
         return bool(event.get_extra(CHAT_MEMORY_TAKEOVER_APPLIED_EXTRA, False))
     except Exception:
@@ -60,12 +52,7 @@ async def load_chat_memory_context_state(
     persona_id: str,
     user_id: str = "",
 ) -> ChatMemoryContextState:
-    """读取与 ChatMemory 当前接管配置完全一致的 LLM ``contexts``。
-
-    ``persona_id`` 与 ``user_id`` 始终传给 ChatMemory，由 ChatMemory 自己应用 persona、
-    cross_session、full_group、状态、内容白名单、前缀和预算等接管配置。私聊没有显式
-    ``user_id`` 时使用 UMO 的 session id；群聊不推断用户，防止静默扩大查询范围。
-    """
+    """读取与 ChatMemory 当前接管配置一致的 LLM contexts（persona_id/user_id 始终传入）。"""
     chat_memory = _resolve_chat_memory(context)
     if chat_memory is None:
         logger.debug(f"{tag()} ChatMemory 未安装或未启用，跳过主动提醒历史注入")
@@ -80,11 +67,7 @@ async def load_chat_memory_context_state(
 
         effective_user_id = (user_id or "").strip()
         parts = (umo or "").split(":", 2)
-        if (
-            not effective_user_id
-            and len(parts) == 3
-            and parts[1] == "FriendMessage"
-        ):
+        if not effective_user_id and len(parts) == 3 and parts[1] == "FriendMessage":
             effective_user_id = parts[2]
 
         contexts = await chat_memory.build_takeover_contexts(
