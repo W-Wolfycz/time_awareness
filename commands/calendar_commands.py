@@ -77,18 +77,14 @@ class CalendarCommands:
             "- 法定节假日（含调休）、传统农历节日、二十四节气\n"
             "- 政治纪念日、国际/西方节日\n"
             "- 黄历开关位于 time_awareness 的「时间传感器」多选（勾选黄历）\n"
-            "- 跨年自动重新生成\n"
-            "\n"
-            "主动提醒（reminder 配置启用后）：\n"
-            "- 当日事项会在配置的时刻主动发到白名单会话\n"
-            "- LLM 可调用 schedule_followup 工具安排「X 分钟后再说」"
+            "- 跨年自动重新生成"
         )
 
     def show(self, month: str = "") -> str:
         now = self._now()
         year, mon = now.year, now.month
         if month:
-            parsed = parse_year_month(month, now)
+            parsed = parse_year_month(month)
             if parsed is None:
                 return f"格式错误：{month}，应为 YYYY-MM 或 YYYY-MM-DD。"
             year, mon = parsed
@@ -240,7 +236,6 @@ class CalendarCommands:
                 user_prompt=theme,
                 system_prompt=build_system_prompt(now.year, max_events),
                 current_year=now.year,
-                max_events=max_events,
             )
         finally:
             if held:

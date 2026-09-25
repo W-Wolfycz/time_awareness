@@ -1,7 +1,6 @@
-"""时笺：时间感知 + 智能日历 + 主动提醒。"""
+"""时笺：时间感知 + 智能日历。"""
 
 import asyncio
-import datetime
 import os
 
 from astrbot.api import AstrBotConfig
@@ -20,10 +19,8 @@ from .core.calendar_manager import CalendarManager
 from .core.calendar_store import CalendarStore
 from .core.daily_schedule_store import DailyScheduleSnapshotStore
 from .core.last_chat_tracker import LastChatTracker
-from .core.scheduler import DueGroup, ReminderScheduler, TriggerResult
 from .core.weather_sensor import WeatherSensor
 from .domain.schedule import detect_static_overlaps
-from .integrations.astrbot_sender import AstrBotMessageSender
 from .integrations.chat_memory_history import is_chat_memory_takeover_applied
 from .services.time_context_service import TimeContextService
 from .services.daily_schedule_service import DailyScheduleService
@@ -33,7 +30,6 @@ from .services.adaptive_policy import (
 )
 from .services.calendar_runtime_service import CalendarRuntimeService
 from .services.daily_schedule_admin_service import DailyScheduleAdminService
-from .services.reminder_service import ReminderService
 from .services.static_schedule_config_service import StaticScheduleConfigService
 from .utils.time_utils import get_now
 from .web_api import register_web_apis
@@ -42,7 +38,7 @@ PLUGIN_DATA_DIR_NAME = "time_awareness"
 
 
 class TimeAwarenessPlugin(Star):
-    """时笺 + 智能日历 + 主动提醒。"""
+    """时笺 + 智能日历。"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -79,7 +75,7 @@ class TimeAwarenessPlugin(Star):
             calendar_store=self.calendar_store,
             last_chat_tracker=self.last_chat_tracker,
         )
-        # 插件级唯一 LLM 闸门：AI 日程、主动提醒与 /calendar create 共用。
+        # 插件级唯一 LLM 闸门：AI 日程与 /calendar create 共用。
         self.llm_gate = AdaptiveConcurrencyGate(
             AdaptiveGenerationPolicy.from_config(self.config).max_concurrent_llm
         )
@@ -99,31 +95,10 @@ class TimeAwarenessPlugin(Star):
             store=self.daily_schedule_store,
             daily_schedule_service=self.daily_schedule_service,
         )
-        # now_provider 用与 fire_at 同时区的 now，避免 aware/naive 比较报错
-        self.scheduler = ReminderScheduler(
-            self.data_dir,
-            self._on_due,
-            now_provider=lambda: get_now(self.config, self._astrbot_config()),
-        )
         self.calendar_runtime = CalendarRuntimeService(
-            config=self.config,
             calendar_store=self.calendar_store,
             builtin_manager=self.builtin_manager,
-            scheduler=self.scheduler,
             time_context=self.time_context,
-            targets_provider=lambda: self.reminder_service.targets(),
-        )
-        self.message_sender = AstrBotMessageSender(self.context)
-        self.reminder_service = ReminderService(
-            context=self.context,
-            config=self.config,
-            scheduler=self.scheduler,
-            time_context=self.time_context,
-            message_sender=self.message_sender,
-            last_chat_tracker=self.last_chat_tracker,
-            astrbot_config_provider=self._astrbot_config,
-            ensure_builtin_fresh=self.calendar_runtime.ensure_builtin_fresh,
-            concurrency_gate=self.llm_gate,
         )
         self.calendar_commands = CalendarCommands(
             context=self.context,
@@ -148,9 +123,7 @@ class TimeAwarenessPlugin(Star):
             save_config=self._try_save_config,
             check_overlap=self._check_schedule_overlap,
         )
-        self.calendar_runtime.apply_reminder_config()
-        self._daily_scan_task: asyncio.Task | None = None
-        # AI 每日日程在配置时刻生成；与 reminder 开关独立
+        self._daily_maintenance_task: asyncio.Task | None = None
         self._daily_schedule_task: asyncio.Task | None = None
         self.web_api = None
 
@@ -166,28 +139,13 @@ class TimeAwarenessPlugin(Star):
         self.daily_schedule_service.set_available(daily_store_ready)
 
         self.calendar_runtime.initialize_builtin_events()
-        self.calendar_runtime.apply_reminder_config()
-        self.scheduler.load()
-
-        reminder_cfg = self.config.get("reminder", {})
-        if not isinstance(reminder_cfg, dict):
-            reminder_cfg = {}
         try:
-            if reminder_cfg.get("enable_reminder", False):
-                # 启动先扫今天事项入队（错过当日提醒时刻仍可补发）
-                self.calendar_runtime.scan_and_enqueue_today_events()
-                self.scheduler.start()
-                self._daily_scan_task = asyncio.create_task(
-                    self.calendar_runtime.run_daily_loop()
-                )
+            # 每日零点检查内置事件跨年刷新；与 AI 日程开关独立
+            self._daily_maintenance_task = asyncio.create_task(
+                self.calendar_runtime.run_daily_loop()
+            )
 
             if self.daily_schedule_service.enabled():
-                # reminder_targets 是启动阶段唯一安全可得的代表会话；UMO 仅存进程
-                for session in self.reminder_service.targets():
-                    await self.daily_schedule_service.register_session_async(
-                        session, trigger=False
-                    )
-                await self.daily_schedule_service.queue_known_profiles()
                 self._daily_schedule_task = asyncio.create_task(
                     self.daily_schedule_service.run_daily_loop()
                 )
@@ -233,12 +191,10 @@ class TimeAwarenessPlugin(Star):
             await self.daily_schedule_service.close()
         except Exception as e:
             logger.warning(f"{tag()} ⚠️ AI 每日日程生成任务停止异常: {e}")
-        await self._cancel_background_task(self._daily_scan_task, "每日扫描 task 停止异常")
-        self._daily_scan_task = None
-        try:
-            await self.scheduler.stop()
-        except Exception as e:
-            logger.warning(f"{tag()} ⚠️ 调度器停止异常: {e}")
+        await self._cancel_background_task(
+            self._daily_maintenance_task, "每日维护 task 停止异常"
+        )
+        self._daily_maintenance_task = None
         try:
             await self.last_chat_tracker.close()
         except Exception as e:
@@ -247,38 +203,6 @@ class TimeAwarenessPlugin(Star):
     async def terminate(self):
         await self._shutdown_resources()
         logger.info(f"{tag()} ✅ 已终止")
-
-    async def create_external_task(
-        self,
-        session: str,
-        fire_at: datetime.datetime,
-        hint: str,
-        target_user_id: str = "",
-        source: str = "",
-    ) -> str:
-        """供其他插件调用的任务创建 API（kind=user），委托 reminder_service。"""
-        return self.reminder_service.create_external_task(
-            session=session,
-            fire_at=fire_at,
-            hint=hint,
-            target_user_id=target_user_id,
-            source=source,
-        )
-
-    async def _on_due(self, group: DueGroup) -> TriggerResult:
-        task_summary = ",".join(f"{t.kind}:{t.id}" for t in group.tasks)
-        late_info = f" late={group.late_minutes}min" if group.is_late else ""
-        logger.info(
-            f"{tag()} 🔔 触发到期任务: session={group.session} "
-            f"tasks={len(group.tasks)} [{task_summary}]{late_info}"
-        )
-        await self.daily_schedule_service.register_session_async(group.session)
-        return await self.reminder_service.deliver(
-            session=group.session,
-            tasks=group.tasks,
-            is_late=group.is_late,
-            late_minutes=group.late_minutes,
-        )
 
     def _astrbot_config(self):
         try:
@@ -494,68 +418,3 @@ class TimeAwarenessPlugin(Star):
             event=event,
         ):
             yield event.plain_result(text)
-
-    @filter.llm_tool(name="schedule_followup")
-    async def schedule_followup_tool(
-        self,
-        event: AstrMessageEvent,
-        delay_minutes: int,
-        hint: str,
-    ) -> str:
-        """
-        安排一个稍后触发的主动消息：到点后你会再次被唤醒，并收到当时的时间、角色状态与本条备忘，
-        以便延续当前的状态和话题。
-
-        触发场景：
-        - 用户明确要求「X 分钟后提醒我」「晚点再聊」等
-        - 你和用户约定了稍后继续某事（如「等我下」「一会儿告诉你」）
-
-        不要触发的场景：
-        - 用户没明确要求时主动定时（避免打扰）
-        - 已完成的事或闲聊中无事可约
-
-        Args:
-            delay_minutes(int): 几分钟后触发。范围 1-1440（最多 24 小时）。
-            hint(string): 给「未来的自己」的备忘。必填。写清楚约定了什么、
-                要继续什么、以什么口吻回应。
-        """
-        reminder_cfg = self.config.get("reminder", {})
-        if not isinstance(reminder_cfg, dict):
-            reminder_cfg = {}
-        if not reminder_cfg.get("enable_reminder", False):
-            return "失败：主动提醒功能未启用"
-        if not reminder_cfg.get("followup_tool_enabled", True):
-            return "失败：schedule_followup 工具已被管理员禁用"
-
-        try:
-            delay = int(delay_minutes)
-        except (TypeError, ValueError):
-            return f"失败：delay_minutes 必须是整数，收到 {delay_minutes!r}"
-        if delay < 1 or delay > 1440:
-            return f"失败：delay_minutes 越界（应为 1-1440，收到 {delay}）"
-
-        hint = (hint or "").strip()
-        if not hint:
-            return "失败：hint 不能为空"
-        if len(hint) > 500:
-            return "失败：hint 长度不能超过 500 字"
-
-        session = event.unified_msg_origin or ""
-        if session not in self.reminder_service.targets():
-            return "失败：当前会话不在提醒白名单内"
-
-        now = get_now(self.config, self._astrbot_config())
-        fire_at = now + datetime.timedelta(minutes=delay)
-        target_uid = event.get_sender_id() or ""
-        self.scheduler.add_followup_task(
-            session=session,
-            fire_at=fire_at,
-            hint=hint,
-            target_user_id=target_uid,
-        )
-        hint_preview = f"（备忘：{hint}）"
-        time_str = fire_at.strftime('%H:%M')
-        return (
-            f"已安排 {delay} 分钟后（{time_str}）触发主动消息{hint_preview}。\n"
-            f"本轮无需向用户复述本次工具调用——若刚才已和用户说过安排，直接返回空回复即可；若未说过，简短告知一声即可。"
-        )

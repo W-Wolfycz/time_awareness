@@ -20,9 +20,6 @@ class BuiltinManager:
         self.data_dir = data_dir
         self._file = os.path.join(data_dir, BUILTIN_FILE_NAME)
 
-    def file_path(self) -> str:
-        return self._file
-
     def load_raw(self) -> dict:
         """加载原始数据。文件不存在或损坏返回空结构。"""
         data = load_mapping(self._file)

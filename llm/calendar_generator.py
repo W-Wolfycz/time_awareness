@@ -59,10 +59,8 @@ def parse_generated_events(response_text: str) -> Optional[list]:
     try:
         data = parse_json_response(response_text, allow_embedded_array=True)
     except ValueError as exc:
-        logger.warning(
-            f"{tag()} ⚠️ AI 生成时间表 JSON 解析失败: {exc}, "
-            f"原文: {response_text}"
-        )
+        # 原文属正文类诊断，已由下方 DEBUG 记录，WARNING 只留异常形态
+        logger.warning(f"{tag()} ⚠️ AI 生成时间表 JSON 解析失败: {exc}")
         return None
 
     if isinstance(data, dict):
@@ -89,7 +87,6 @@ async def generate_calendar_events(
     user_prompt: str,
     system_prompt: str,
     current_year: int,
-    max_events: int = DEFAULT_MAX_GENERATE,
 ) -> Optional[list]:
     """发起 LLM 调用，根据主题提示词生成时间表事项。"""
     user_prompt = (user_prompt or "").strip()
@@ -108,7 +105,11 @@ async def generate_calendar_events(
         return None
 
     if not llm_response or llm_response.role != "assistant":
-        logger.warning(f"{tag()} ⚠️ AI 生成时间表 LLM 响应异常: {llm_response}")
+        logger.warning(
+            f"{tag()} ⚠️ AI 生成时间表 LLM 响应异常: "
+            f"type={type(llm_response).__name__} "
+            f"role={getattr(llm_response, 'role', '')}"
+        )
         return None
 
     response_text = llm_response.completion_text

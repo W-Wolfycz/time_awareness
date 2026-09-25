@@ -13,13 +13,13 @@
         "description": "🌐 插件 LLM 全局并发上限",
         "type": "int",
         "default": 0,
-        "hint": "AI 日程/主动提醒//calendar create 共用并发上限（1–4）；0=默认 1"
+        "hint": "AI 日程与 /calendar create 共用并发上限（1–4）；0=默认 1"
       },
       "state_retention_days": {
-        "description": "🗑️ 已结束任务保留期限",
+        "description": "🗑️ 运行期状态保留期限",
         "type": "int",
         "default": 7,
-        "hint": "任务页「已结束」列表与后台每日锁的保留天数（1–365）；不影响日程快照保留"
+        "hint": "运行期状态保留期（天）：过期日程生成状态与终态锁的回收窗口"
       }
     }
   },
@@ -90,100 +90,6 @@
         "default": false,
         "hint": "向 LLM 提供今日干支、冲煞和宜忌；建议与农历感知一同启用",
         "invisible": true
-      }
-    }
-  },
-  "reminder": {
-    "description": "🔔 主动提醒设置",
-    "type": "object",
-    "items": {
-      "enable_reminder": {
-        "description": "✅ 启用主动提醒",
-        "type": "bool",
-        "default": false,
-        "hint": "按设定时间向白名单会话发送日历提醒，并允许 LLM 安排后续消息"
-      },
-      "reminder_targets": {
-        "description": "📋 提醒目标会话白名单(UMO)",
-        "type": "list",
-        "default": [],
-        "condition": {
-          "enable_reminder": true
-        },
-        "hint": "每行一个 UMO，如 aiocqhttp:GroupMessage:10001；只发送到这些会话"
-      },
-      "reminder_time": {
-        "description": "⏰ 当日日历事件发送时刻",
-        "type": "string",
-        "default": "09:00",
-        "condition": {
-          "enable_reminder": true
-        },
-        "hint": "HH:MM；到点合并发送当日日历事项"
-      },
-      "daily_greeting_without_events": {
-        "description": "💬 无事件也发问候",
-        "type": "bool",
-        "default": true,
-        "condition": {
-          "enable_reminder": true
-        },
-        "hint": "无日历事项时仍在提醒时刻发一条问候（默认开启）"
-      },
-      "reminder_max_late_minutes": {
-        "description": "⏳ 迟到容忍窗口（分钟）",
-        "type": "int",
-        "default": 60,
-        "condition": {
-          "enable_reminder": true
-        },
-        "hint": "迟到不超过此分钟数仍补发；超过标记过期；0=不检查"
-      },
-      "reminder_max_attempts": {
-        "description": "🔁 发送前失败最大尝试次数",
-        "type": "int",
-        "default": 3,
-        "condition": {
-          "enable_reminder": true
-        },
-        "hint": "发送前失败最多重试次数（1–10）；进入发送阶段后不重试"
-      },
-      "reminder_late_prompt": {
-        "description": "😅 迟到提示词",
-        "type": "text",
-        "default": "<LATE_PROMPT>\n你刚才承诺/计划在 {delay_minutes} 分钟前发这条消息，但错过了。请用符合人设的语气自然带出\"来晚了/让你等了\"等感受，不要刻意道歉过多，然后继续完成原本要说的话。\n</LATE_PROMPT>",
-        "condition": {
-          "enable_reminder": true
-        },
-        "hint": "补发时附加给 LLM；{delay_minutes}=实际迟到分钟数"
-      },
-      "followup_tool_enabled": {
-        "description": "🛠️ 向 LLM 注册 schedule_followup 工具",
-        "type": "bool",
-        "default": true,
-        "condition": {
-          "enable_reminder": true
-        },
-        "hint": "允许 LLM 安排稍后的主动消息；仅白名单会话生效"
-      },
-      "use_chat_memory_history": {
-        "description": "🧠 主动提醒复用 ChatMemory 接管上下文",
-        "type": "bool",
-        "default": false,
-        "condition": {
-          "enable_reminder": true
-        },
-        "hint": "生成提醒时复用 ChatMemory 接管上下文；需 chat_memory 已装且接管开启"
-      },
-      "reminder_provider_id": {
-        "description": "🤖 主动提醒使用的模型(provider_id)",
-        "type": "string",
-        "default": "",
-        "_special": "select_provider",
-        "condition": {
-          "enable_reminder": true
-        },
-        "hint": "主动提醒模型；留空用目标会话当前模型"
       }
     }
   },
@@ -569,7 +475,7 @@
                 "type": "int",
                 "default": 1,
                 "invisible": true,
-                "hint": "旧位置兼容回退：顶层 runtime.llm_max_concurrency 优先（范围 1–4），该新键未配置或为 0 时才使用此值。AI 日程、主动提醒与 /calendar create 共用该插件级闸门，不影响 AstrBot 或其他插件"
+                "hint": "旧位置兼容回退：顶层 runtime.llm_max_concurrency 优先（1–4）；未配置或为 0 时才用此值（AI 日程共用）"
               },
               "acquire_timeout_seconds": {
                 "description": "⏳ 并发等待超时",

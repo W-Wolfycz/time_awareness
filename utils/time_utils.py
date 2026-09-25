@@ -1,16 +1,9 @@
-"""时间工具：时区解析、当前时间、跨午夜判定、日程命中。"""
+"""时间工具：时区解析与当前时间。"""
 
 import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ..domain.schedule import (
-    ScheduleValidationError,
-    find_active_static_slot,
-    is_minute_in_static_range,
-    minute_of_day,
-    parse_time,
-)
 from ..log import logger, tag
 
 UTC = datetime.timezone.utc
@@ -111,59 +104,3 @@ def get_now(config: dict, astrbot_config=None) -> datetime.datetime:
     if tz is not None:
         return datetime.datetime.now(tz=tz)
     return datetime.datetime.now()
-
-
-def to_utc(
-    dt: datetime.datetime,
-    default_tz: datetime.tzinfo | None = None,
-) -> datetime.datetime:
-    """将时间转换成内部统一使用的 UTC aware datetime（naive 用 default_tz 或系统本地时区解释）。"""
-    if not isinstance(dt, datetime.datetime):
-        raise TypeError(f"dt 必须是 datetime.datetime，收到 {type(dt)!r}")
-    if dt.tzinfo is None:
-        if default_tz is None:
-            default_tz = datetime.datetime.now().astimezone().tzinfo or UTC
-        dt = dt.replace(tzinfo=default_tz)
-    return dt.astimezone(UTC)
-
-
-def utc_now() -> datetime.datetime:
-    """返回 UTC aware 当前时间。"""
-    return datetime.datetime.now(UTC)
-
-
-def coerce_to_aware(dt: datetime.datetime, reference: datetime.datetime) -> datetime.datetime:
-    """把 dt 的时区属性规整到与 reference 同性质，避免 aware/naive 比较报错。"""
-    if dt.tzinfo is None and reference.tzinfo is not None:
-        return dt.replace(tzinfo=reference.tzinfo)
-    if dt.tzinfo is not None and reference.tzinfo is None:
-        local_tz = datetime.datetime.now().astimezone().tzinfo or UTC
-        return dt.astimezone(local_tz).replace(tzinfo=None)
-    if dt.tzinfo is not None and reference.tzinfo is not None:
-        return dt.astimezone(reference.tzinfo)
-    return dt
-
-
-def find_active_schedule_slot(
-    daily_schedule_config: dict,
-    now: "datetime.datetime | None" = None,
-) -> dict | None:
-    """返回当前时间命中的时段 dict；未命中返回 None（用于 <SCHEDULE_STATE> 状态文本解析）。"""
-    slots = daily_schedule_config.get("schedule_templates") or []
-    if not isinstance(slots, list) or not slots:
-        return None
-    if now is None:
-        now = datetime.datetime.now()
-    return find_active_static_slot(slots, now)
-
-
-def _is_in_range(now: "datetime.datetime", time_range: str) -> bool:
-    """检查 now 是否落在 time_range 内（end exclusive）。支持跨午夜。"""
-    try:
-        start_time, end_time = time_range.split("-", 1)
-        start = parse_time(start_time.strip(), strict=False)
-        end = parse_time(end_time.strip(), strict=False)
-        return is_minute_in_static_range(minute_of_day(now), start, end)
-    except (ScheduleValidationError, ValueError) as e:
-        logger.warning(f"{tag()} ⚠️ 时段范围解析错误 '{time_range}': {e}")
-        return False

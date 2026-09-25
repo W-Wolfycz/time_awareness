@@ -139,10 +139,6 @@ class CalendarManager:
             "events": list(self.store.events),
         }
 
-    def get_events(self) -> list:
-        """返回全部事项（内存副本）。"""
-        return list(self.store.events)
-
     def add_event(self, raw: dict) -> dict | None:
         """新增一条事项；成功返回创建后的事项，失败返回 None。"""
         if len(self.store.events) >= MAX_EVENTS:
@@ -158,26 +154,6 @@ class CalendarManager:
             self.store.events.pop()
             return None
         return event
-
-    def update_event(self, event_id: str, raw: dict) -> dict | None:
-        """按 id 更新事项；成功返回更新后的事项，失败/未找到返回 None。"""
-        event_id = str(event_id or "").strip()
-        if not event_id:
-            return None
-        for idx, existing in enumerate(self.store.events):
-            if existing.get("id") == event_id:
-                payload = dict(raw or {})
-                payload["id"] = event_id
-                event = self.normalize_event(payload)
-                if event is None:
-                    return None
-                original = self.store.events[idx]
-                self.store.events[idx] = event
-                if not self.save():
-                    self.store.events[idx] = original
-                    return None
-                return event
-        return None
 
     def delete_event(self, event_id: str) -> bool:
         """按 id 删除事项；成功返回 True，未找到返回 False。"""

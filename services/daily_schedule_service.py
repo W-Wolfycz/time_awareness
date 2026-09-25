@@ -120,15 +120,6 @@ class DailyScheduleService:
     def set_available(self, available: bool) -> None:
         self._available = bool(available)
 
-    def ensure_available(self) -> bool:
-        """功能在运行期由命令启用时，按需初始化快照 Store。"""
-        if not self.configured_enabled():
-            return False
-        if self._available:
-            return True
-        self._available = bool(self.store.load())
-        return self._available
-
     def _daily_schedule_config(self) -> dict:
         """daily_schedule 配置块；非 dict 时回退空 dict。"""
         daily = self.config.get("daily_schedule", {}) if isinstance(self.config, dict) else {}
@@ -342,7 +333,7 @@ class DailyScheduleService:
         self._session_active_at[session] = now or self.time_context.now()
 
     def _expire_stale_sessions(self, now: datetime.datetime) -> None:
-        """删除一整天未活跃的 UMO；仅清进程内集合，不删快照/日历/提醒数据。"""
+        """删除一整天未活跃的 UMO；仅清进程内集合，不删快照/日历数据。"""
         threshold = now - datetime.timedelta(days=1)
         stale = [
             session

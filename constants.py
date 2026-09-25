@@ -31,11 +31,6 @@ DEFAULT_AI_GENERATE_SYSTEM_PROMPT = """你是一名「世界观日历设计师�
 示例结构：
 [{"month": 1, "day": 1, "text": "新纪元启航日", "repeat": -1}, {"month": 3, "day": 21, "text": "春分·种子祭", "repeat": -1}, {"month": 10, "day": 7, "text": "据点建立纪念日", "repeat": -1}]"""
 
-# 必须与 _conf_schema.json 的 reminder.late_prompt default 一致；{delay_minutes} 替换为迟到分钟数。
-DEFAULT_LATE_PROMPT = """<LATE_PROMPT>
-你刚才承诺/计划在 {delay_minutes} 分钟前发这条消息，但错过了。请用符合人设的语气自然带出"来晚了/让你等了"等感受，不要刻意道歉过多，然后继续完成原本要说的话。
-</LATE_PROMPT>"""
-
 # Step1：基于历史状态+实际日程+传感器评估当日初始角色状态（不含情绪维度）。
 DEFAULT_BOUNDARY_EVALUATION_SYSTEM_PROMPT = """你是一名「角色状态评估器」。你的唯一任务是根据用户消息中的历史角色状态、实际日程（<ACTUAL_SCHEDULES>）、世界观与当日传感器事实，评估角色「当日开始时」的角色状态。
 

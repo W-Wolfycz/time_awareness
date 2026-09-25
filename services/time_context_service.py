@@ -117,9 +117,6 @@ class TimeContextService:
     def enabled_builtin_categories(self) -> list[str]:
         return self.facts.enabled_builtin_categories()
 
-    def resolve_schedule_state(self, *, now=None, session: str | None = None) -> str:
-        now = now or self.now()
-        return self.facts.resolve_schedule(now=now, session=session).state
 
     @staticmethod
     def _generation_sensor(fact: SensorFact, *, as_of: str, limit: int = 0) -> dict:

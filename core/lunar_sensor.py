@@ -43,13 +43,4 @@ class LunarSensor:
             logger.warning(f"{tag()} ⚠️ LunarSensor 计算异常 {date}: {e}")
             return "", empty
 
-    def describe(self, date: datetime.date) -> str:
-        """LLM 注入用的完整农历字符串。"""
-        return self.collect(date)[0]
-
-    def describe_detailed(self, date: datetime.date) -> dict:
-        """WebUI 用结构化农历数据；异常或库未安装返回空字段。"""
-        return self.collect(date)[1]
-
-
 lunar_sensor = LunarSensor()  # 模块级单例

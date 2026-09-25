@@ -22,7 +22,6 @@ from ..log import logger, tag
 from .json_response import json_block, parse_json_response
 
 
-
 # 日界状态白名单键（有限范围、去身份化）
 _BOUNDARY_STATE_NUMERIC_KEYS = {"energy", "sleep_debt", "focus", "social_energy", "motivation"}
 _BOUNDARY_STATE_STRING_KEYS = {"physical_state", "daily_theme", "daily_style"}
@@ -163,7 +162,7 @@ class PlanningResult:
     slots: list[dict]
 
 
-def parse_daily_schedule_json(text: str, *, max_slots: int = 24) -> list[dict]:
+def parse_daily_schedule_json(text: str) -> list[dict]:
     """解析基础数组协议输出；只接受协议字段、日内非跨午夜且互不重叠的时段。"""
     try:
         data = parse_json_response(text, require_closed_fence=True)
@@ -171,7 +170,7 @@ def parse_daily_schedule_json(text: str, *, max_slots: int = 24) -> list[dict]:
         raise ScheduleValidationError("输出不是合法 JSON") from exc
     if not isinstance(data, list):
         raise ScheduleValidationError("顶层必须是数组")
-    # max_slots 是提示词层「期望值」而非硬上限：此处只保留固定防失控安全上限。
+    # 时段数量的「期望值」由提示词层 <DATE_CONTEXT>.target_slots 表达，此处只保留固定防失控安全上限。
     _safety_cap = 60
     if len(data) > _safety_cap:
         raise ScheduleValidationError(f"时段数量超出安全上限（{_safety_cap}）")
@@ -412,14 +411,11 @@ def deterministic_score(
     return round(score, 4)
 
 
-
-
 async def generate_daily_schedule(
     context: Any,
     *,
     provider_id: str,
     prompt: str,
-    max_slots: int = 24,
 ) -> tuple[PlanningResult, str]:
     """调用 Provider 并返回已经过数组协议校验的规划结果和原始文本。"""
     response = await context.llm_generate(
@@ -433,7 +429,7 @@ async def generate_daily_schedule(
     if not raw_text:
         raise ScheduleValidationError("LLM 返回空内容")
     return (
-        PlanningResult(slots=parse_daily_schedule_json(raw_text, max_slots=max_slots)),
+        PlanningResult(slots=parse_daily_schedule_json(raw_text)),
         raw_text,
     )
 

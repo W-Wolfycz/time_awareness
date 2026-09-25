@@ -1,6 +1,6 @@
 # 时笺 — TimeAwareness
 
-为 LLM 提供现实时间、角色时段状态、工作日/农历/黄历、日历事项、上次对话间隔和主动提醒能力。
+为 LLM 提供现实时间、角色时段状态、工作日/农历/黄历、日历事项与上次对话间隔感知。
 
 ## 功能
 
@@ -8,8 +8,7 @@
 - 单日日程表：静态日程配置 + 按 Persona 每天自动生成、按时间冻结的 AI 日程快照（同一 Persona 的多个 Bot 共享）；用户可通过 WebUI 覆盖未来时段。
 - 时间传感器：工作日、农历、黄历、现实日历事件、上次对话间隔。
 - AI 日历：按世界观生成全年节日、纪念日和季节事项。
-- 主动提醒：在白名单会话发送日历提醒、问候和后续任务。
-- Plugin Page：概览（含「查看今日随机天气」）、日历、任务、静态日程管理，以及「人格日程」查看 + 用户覆盖层编辑；其他低频配置仍使用 AstrBot 主配置页。
+- Plugin Page：概览（含「查看今日随机天气」）、日历、静态日程管理，以及「人格日程」查看 + 用户覆盖层编辑；其他低频配置仍使用 AstrBot 主配置页。
 
 ## 安装
 
@@ -17,7 +16,7 @@
 
 ## 配置
 
-AstrBot 主配置页采用渐进显示：日程、AI 日程、自适应增强、主动提醒和内置事件的子项只在对应上级开关启用后挂载；隐藏不影响已保存值。静态日程可用主配置页的折叠模板编辑器（内置「时段」「睡眠」「午餐」「晚餐」预设），也可用 Plugin Page 的分页编辑器；条目较多时后者更流畅。
+AstrBot 主配置页采用渐进显示：日程、AI 日程、自适应增强和内置事件的子项只在对应上级开关启用后挂载；隐藏不影响已保存值。静态日程可用主配置页的折叠模板编辑器（内置「时段」「睡眠」「午餐」「晚餐」预设），也可用 Plugin Page 的分页编辑器；条目较多时后者更流畅。
 
 ### `time_awareness`
 
@@ -62,7 +61,7 @@ AstrBot 主配置页采用渐进显示：日程、AI 日程、自适应增强、
 
 时段采用左闭右开规则：开始时刻计入，结束时刻不计入；`24:00` 只允许作为当日不可命中的右边界。相邻时段请首尾衔接（如 `07:00–07:30` 与 `07:30–08:00`）；结束时间早于开始时间表示跨午夜，写入快照时拆成两个非跨日片段。
 
-AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一 Persona 的多个 Bot 共享同一份日程，切换 Persona 立即切换快照。`generation_time=HH:MM` 在当天该时刻生成当天日程；前导负号表示提前一天，例如 `-23:30` 会在今晚 23:30 生成明天的完整日程（快照日期、传感器和连续性均按明天计算）。启动或首次遇到新 Persona 且当天缺快照时异步补生成；首次消息不会等待模型，本轮直接使用静态日程。AI 输出允许只描述有明确状态特征的稀疏时段，也允许合法的空日程（`[]`，落盘为可用快照）；当前时刻按「AI → 静态 → 无固定安排」解析。重叠、非法时间或危险文本仍会拒绝新结果并保留旧快照。Persona 是必备身份：解析失败时不生成快照，当前消息走静态日程/「无固定安排」。
+AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一 Persona 的多个 Bot 共享同一份日程，切换 Persona 立即切换快照。`generation_time=HH:MM` 在当天该时刻生成当天日程；前导负号表示提前一天，例如 `-23:30` 会在今晚 23:30 生成明天的完整日程（快照日期、传感器和连续性均按明天计算）。首次遇到新 Persona 且当天缺快照时异步补生成；首次消息不会等待模型，本轮直接使用静态日程。AI 输出允许只描述有明确状态特征的稀疏时段，也允许合法的空日程（`[]`，落盘为可用快照）；当前时刻按「AI → 静态 → 无固定安排」解析。重叠、非法时间或危险文本仍会拒绝新结果并保留旧快照。Persona 是必备身份：解析失败时不生成快照，当前消息走静态日程/「无固定安排」。
 
 **分层来源与冻结**（2.0.0）：快照持久化「已执行时间线 + 用户层 + AI 层 + 静态层」四层，读取时动态合并。已执行区间在每次修改操作时按服务端实际接收时刻冻结（非整分钟向上取整到下一整分钟），冻结后不可被任何来源改写或回填；用户层高于 AI 与静态日程，AI 与静态的优先级由 `ai_daily.ai_priority_over_static` 决定；用户时段互不重叠，删除未来用户时段后底层自动恢复。WebUI 中 AI 与静态日程卡片始终只读，用户通过新增/修改覆盖层影响未来时间线；`/schedule regenerate` 保留已执行部分、清空未执行用户层并替换未来 AI 日程。
 
@@ -80,29 +79,12 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 | `ai_generate_max_events` | `/calendar create` 单次生成事项条数期望值（约这个数，非硬上限；超出 400 条被安全上限截断） | `40` |
 | `builtin_event_categories` | 内置现实事件分类多选：`legal_holidays` 法定节假日、`traditional` 传统节日、`solar_terms` 节气、`political` 政治纪念日、`international` 国际节日；勾选任意一项即启用内置现实事件，全部不选则关闭 | `["legal_holidays", "traditional", "solar_terms"]` |
 
-### `reminder`
-
-| 配置项 | 说明 | 默认值 |
-|---|---|---|
-| `enable_reminder` | 启用主动提醒 | `false` |
-| `reminder_targets` | 目标会话白名单（UMO，每行一个） | `[]` |
-| `reminder_time` | 日历提醒时间（HH:MM） | `09:00` |
-| `daily_greeting_without_events` | 无事件时也发送问候 | `true` |
-| `reminder_max_late_minutes` | 迟到容忍分钟数；`0` 表示不检查最大迟到时间 | `60` |
-| `reminder_max_attempts` | 发送前失败最大重试次数 | `3` |
-| `reminder_late_prompt` | 迟到补发提示 | 内置默认 |
-| `followup_tool_enabled` | 注册 `schedule_followup` 工具 | `true` |
-| `use_chat_memory_history` | 使用 ChatMemory 接管上下文 | `false` |
-| `reminder_provider_id` | 主动提醒模型，留空跟随当前会话 | `""` |
-
-主动提醒通过 `Context.llm_generate()` 独立调用，不经过 AstrBot 的 `on_llm_request`；启用时笺后，插件会自行追加完整动态上下文。
-
 ### `runtime`
 
 | 配置项 | 说明 | 默认值 |
 |---|---|---|
-| `llm_max_concurrency` | AI 日程、主动提醒和 `/calendar create` 共用的插件级并发上限（1–4）；`0`=默认 1 | `0` |
-| `state_retention_days` | 已结束任务历史与每日锁保留天数（1–365），不影响快照保留 | `7` |
+| `llm_max_concurrency` | AI 日程与 `/calendar create` 共用的插件级并发上限（1–4）；`0`=默认 1 | `0` |
+| `state_retention_days` | 过期日程生成状态与终态锁的回收窗口（1–365），不影响快照保留 | `7` |
 
 ### `log_with_bot_id`
 
@@ -124,7 +106,7 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 <LAST_CHAT>上次对话间隔</LAST_CHAT>
 ```
 
-`<SCHEDULE_STATE>` 在日程未启用或未命中时为“无固定安排（按人设自然演绎）”；`<WEATHER>` 仅在启用随机天气时出现；其他标签在没有数据或关闭对应传感器时省略。普通消息链使用临时 `extra_user_content_parts`，主动提醒链将同一内容追加到本轮 `prompt`。ChatMemory takeover contexts 已逐条携带 `<cm_time>`，所以它实际接管本轮请求时不会重复注入 `<LAST_CHAT>`；本地时间记录仍继续维护。
+`<SCHEDULE_STATE>` 在日程未启用或未命中时为“无固定安排（按人设自然演绎）”；`<WEATHER>` 仅在启用随机天气时出现；其他标签在没有数据或关闭对应传感器时省略。普通消息链使用临时 `extra_user_content_parts`。ChatMemory takeover contexts 已逐条携带 `<cm_time>`，所以它实际接管本轮请求时不会重复注入 `<LAST_CHAT>`；本地时间记录仍继续维护。
 
 ## 命令
 
@@ -140,46 +122,26 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 
 日期支持 `YYYY-MM-DD` 或 `MM-DD`；重复参数 `0` 表示仅当年，`1–4` 表示额外重复年数，`9` 表示每年重复。
 
-## 主动提醒与插件协作
-
-- 主动消息会进入结果装饰链；是否安装分段插件不会改变 LLM 提示词。没有分段插件时作为一条消息发送。
-- `use_chat_memory_history` 默认关闭。开启后仅调用已激活 ChatMemory 的公开只读 API；接管未启用、范围不安全或查询失败时自动降级为空历史。
-- Provider/LLM 等发送前失败按指数退避重试；进入装饰/发送阶段后不自动重发，避免部分分段已经发出却重复整条消息。
-
-### 插件间 API
-
-其他插件可通过 `context.get_registered_star("time_awareness")` 获取实例并调用：
-
-```python
-star_meta = self.context.get_registered_star("time_awareness")
-if star_meta and star_meta.star_cls:
-    task_id = await star_meta.star_cls.create_external_task(
-        session="aiocqhttp:GroupMessage:group_demo",
-        fire_at=fire_at,
-        hint="该喝水了",
-        source="plugin:water_reminder",
-    )
-```
-
-`session` 必须在 `reminder_targets` 中，`fire_at` 必须是未来至少 60 秒且不超过 365 天的时间。
-
 ## 推荐配置组合
 
 | 目标 | 关键配置 |
 |---|---|
-| 只需要时笺 | `time_guidance_enabled=true`，日程/日历/提醒保持关闭 |
+| 只需要时笺 | `time_guidance_enabled=true`，日程/日历保持关闭 |
 | 静态角色作息 | `enable_schedule=true`、`ai_daily.enabled=false`、填写 `schedule_templates`（无每日 LLM 调用） |
 | 基础 AI 每日日程 | `enable_schedule` 与 `ai_daily.enabled` 开启，`adaptive.enabled=false`（每 Persona/日期通常一次调用） |
 | 低成本动态化 | `adaptive.enabled=true`、`recent_days=3`、`state_continuity_enabled=true`、`candidate_count=1`、`candidate_selection=heuristic` |
 | 高质量多候选 | `adaptive.enabled=true`、`candidate_count=3`、`candidate_selection=llm`、并发 2–3（token 与并发占用明显增加） |
-| 主动提醒与 ChatMemory | `reminder` 开启 + `reminder_targets` 白名单 + `use_chat_memory_history=true` + ChatMemory takeover 启用（不可用时自动降级空历史） |
 
 ## 数据、WebUI 与依赖
 
-- 数据目录：`data/plugin_data/time_awareness/`，包括日历、提醒、上次对话时间和按需创建的 AI 日程快照/HMAC secret。AI 每日日程关闭时不会创建对应文件；快照不保存原始 Bot/用户/群 ID、Persona prompt 或对话历史。
-- WebUI 提供概览、日历、任务、「静态日程」与「人格日程」视图。静态日程使用分页紧凑列表和单一编辑弹窗，保存时以 revision 防止多页面互相覆盖。人格日程页可按 Persona/日期查看快照：已执行、AI 与静态日程卡片始终只读，用户通过新增/修改用户时段覆盖未来时间线（完全未来可改全部字段，跨冻结点尾段仅可改结束时间或删除）；保存请求只提交用户层，服务端按最新冻结点重新合并。人工修改后的日程不会被 AI 每日补生成覆盖（`/schedule regenerate` 可恢复 AI 版本），并作为次日「昨日实际日程」参与连续性规划。
+- 数据目录：`data/plugin_data/time_awareness/`，包括日历、上次对话时间和按需创建的 AI 日程快照/HMAC secret。AI 每日日程关闭时不会创建对应文件；快照不保存原始 Bot/用户/群 ID、Persona prompt 或对话历史。
+- WebUI 提供概览、日历、「静态日程」与「人格日程」视图。静态日程使用分页紧凑列表和单一编辑弹窗，保存时以 revision 防止多页面互相覆盖。人格日程页可按 Persona/日期查看快照：已执行、AI 与静态日程卡片始终只读，用户通过新增/修改用户时段覆盖未来时间线（完全未来可改全部字段，跨冻结点尾段仅可改结束时间或删除）；保存请求只提交用户层，服务端按最新冻结点重新合并。人工修改后的日程不会被 AI 每日补生成覆盖（`/schedule regenerate` 可恢复 AI 版本），并作为次日「昨日实际日程」参与连续性规划。
 - Python ≥ 3.10；AstrBot `>=4.26.0,<5`；依赖 `pyyaml`、`chinese_calendar`、`lunar_python`，Windows 另按条件安装 `tzdata` 以支持 IANA 时区。
 
-## 从 v2.x 升级到 v3.0
+## 从 v2.2 升级到 v2.3
 
-旧配置形态不再自动迁移（布尔开关→多选、两代 `ai_generation` 分组）；升级后请到配置页重设 AI 生成参数与传感器/内置事件多选；scheduler 任务文件旧 v1 标记不再解析；旧键会被 AstrBot 依 schema 自动清理。
+主动提醒能力已移除：`reminder` 配置组、`schedule_followup` 工具、`create_external_task` 插件 API、Plugin Page「任务」视图与 `reminder_tasks.yaml` 均不再使用（旧文件可手动删除，旧配置键由 AstrBot 依 schema 清理）。定时提醒需求请改用 AstrBot 内置的 `future_task` 工具（由 `provider_settings.proactive_capability.add_cron_tools` 控制）。
+
+## 从 v2.1 升级到 v2.2
+
+旧配置形态不再自动迁移（布尔开关→多选、两代 `ai_generation` 分组）；升级后请到配置页重设 AI 生成参数与传感器/内置事件多选；旧键会被 AstrBot 依 schema 自动清理。

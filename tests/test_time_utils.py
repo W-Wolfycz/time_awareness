@@ -2,19 +2,15 @@
 
 import datetime
 
-import pytest
 from zoneinfo import ZoneInfo
 
 from time_awareness.utils.time_utils import (
     UTC,
     _bounded_int,
-    coerce_to_aware,
     get_now,
     get_tz,
     timezone_from_key,
     to_timezone_key,
-    to_utc,
-    utc_now,
 )
 
 
@@ -51,24 +47,6 @@ def test_to_timezone_key():
 def test_get_now():
     assert get_now({"time_awareness": {"timezone": "UTC"}}).tzinfo is not None
     assert get_now({}).tzinfo is None
-
-
-def test_to_utc():
-    aware = datetime.datetime(2026, 8, 11, 8, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-    assert to_utc(aware) == datetime.datetime(2026, 8, 11, 0, 0, tzinfo=UTC)
-    naive = datetime.datetime(2026, 8, 11, 7, 30)
-    assert to_utc(naive, default_tz=UTC) == datetime.datetime(2026, 8, 11, 7, 30, tzinfo=UTC)
-    with pytest.raises(TypeError):
-        to_utc("2026-08-11")
-    assert utc_now().utcoffset() == datetime.timedelta(0)
-
-
-def test_coerce_to_aware():
-    ref_aware = datetime.datetime(2026, 8, 11, 7, 30, tzinfo=UTC)
-    assert coerce_to_aware(datetime.datetime(2026, 8, 11, 7, 30), ref_aware).tzinfo == UTC
-    assert coerce_to_aware(ref_aware, datetime.datetime(2026, 8, 11, 7, 30)).tzinfo is None
-    sh = datetime.datetime(2026, 8, 11, 7, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
-    assert coerce_to_aware(ref_aware, sh).utcoffset() == datetime.timedelta(hours=8)
 
 
 def test_bounded_int():

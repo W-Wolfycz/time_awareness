@@ -43,7 +43,7 @@ def find_event_by_short_id(store, short: str) -> dict | None:
     return None
 
 
-def parse_year_month(text: str, now) -> tuple | None:
+def parse_year_month(text: str) -> tuple | None:
     text = (text or "").strip()
     try:
         parts = text.split("-")

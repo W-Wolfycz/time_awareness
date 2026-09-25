@@ -61,12 +61,6 @@ async def resolve_effective_persona(
         return "", None
 
 
-async def resolve_persona_prompt(context: Any, umo: str, event: Any = None) -> str:
-    """返回当前实际生效 Persona 的 prompt。"""
-    _, persona = await resolve_effective_persona(context, umo, event=event)
-    return extract_persona_prompt(persona)
-
-
 def extract_persona_prompt(persona: Any | None) -> str:
     """从 ``resolve_selected_persona`` 返回对象中提取 prompt。"""
     if not persona:

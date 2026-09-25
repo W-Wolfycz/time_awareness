@@ -20,12 +20,12 @@ def configure(log_with_bot_id: bool = False) -> None:
 
 
 def tag(event=None) -> str:
-    """返回 [time_awareness]；启用 log_with_bot_id 且有 event 时带 platform_id。"""
+    """返回 [time_awareness]；启用 log_with_bot_id 且有 event 时追加 [platform:{id}]。"""
     if _with_bot_id and event is not None:
         try:
             pid = event.get_platform_id()
             if pid:
-                return f"[time_awareness:{pid}]"
+                return f"[time_awareness][platform:{pid}]"
         except Exception:
             pass
     return "[time_awareness]"

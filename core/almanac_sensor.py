@@ -39,12 +39,4 @@ class AlmanacSensor:
             logger.warning(f"{tag()} ⚠️ AlmanacSensor 计算异常 {date}: {e}")
             return "", empty
 
-    def describe(self, date: datetime.date) -> str:
-        return self.collect(date)[0]
-
-    def describe_detailed(self, date: datetime.date) -> dict:
-        """WebUI 用拆分字段；异常或库未安装返回全空 dict。"""
-        return self.collect(date)[1]
-
-
 almanac_sensor = AlmanacSensor()  # 模块级单例，无状态可直接用

@@ -18,7 +18,6 @@ GROUP_1 = "aiocqhttp:GroupMessage:10001"
 
 def _config():
     return {
-        "reminder": {"enable_reminder": False},
         "daily_schedule": {"enable_schedule": False},
         "time_awareness": {"time_guidance_enabled": True, "time_sensors": []},
         "calendar": {"enable_builtin_events": False},
@@ -55,22 +54,6 @@ def test_plugin_entry_lifecycle(tmp_path, monkeypatch):
                 FakeEvent(unified_msg_origin="aiocqhttp:GroupMessage:20002", message_str="/x")
             )
             assert "aiocqhttp:GroupMessage:20002" not in plugin.last_chat_tracker._sessions
-
-            assert await plugin.schedule_followup_tool(event, 5, "备忘") == (
-                "失败：主动提醒功能未启用"
-            )
-
-            plugin.config["reminder"] = {
-                "enable_reminder": True,
-                "reminder_targets": [GROUP_1],
-            }
-            assert await plugin.schedule_followup_tool(event, 2000, "备忘") == (
-                "失败：delay_minutes 越界（应为 1-1440，收到 2000）"
-            )
-            other = FakeEvent(unified_msg_origin="aiocqhttp:GroupMessage:99999")
-            assert await plugin.schedule_followup_tool(other, 5, "备忘") == (
-                "失败：当前会话不在提醒白名单内"
-            )
         finally:
             await plugin.terminate()
 

@@ -1,5 +1,15 @@
 # 更新日志
 
+## 2.3.0 — 2026-09-25
+
+### 变更
+
+- **死代码/冗余参数清理**：删除无引用函数与方法（`timeline.subtract_slots`、`persona_resolver.resolve_persona_prompt`、`CalendarManager.get_events`/`update_event`、`BuiltinManager.file_path`、`DailyScheduleService.ensure_available`、`TimeContextService.resolve_schedule_state`）、重构后失效的参数（日程解析的 `max_slots`、`_resolve_provider_id` 的 session、`parse_year_month` 的 now、`generate_calendar_events` 的 max_events）、两个前端从不调用的 Web API 端点（`schedules/delete`、`config/schema`）与前端死样式（任务视图遗留 9 条 + 无引用图例 2 条；人格日程的 slot 状态/来源类为动态拼接，已保留）
+- **日志规范修正**：`log_with_bot_id` 启用时前缀由 `[time_awareness:{platform_id}]` 改为 `[time_awareness][platform:{platform_id}]`（统一格式）；`/calendar create` 的 JSON 解析失败与 LLM 响应异常不再于 WARNING 回显模型原文/响应对象（原文保留在 DEBUG）
+- **主动提醒能力整体移除**：删除自研提醒调度器、提醒服务与装饰链发送适配（约 1500 行实现）；同时移除 `reminder` 配置组、`schedule_followup` 工具、`create_external_task` 插件 API、Plugin Page「任务」视图与相关测试。定时提醒需求改用 AstrBot 内置 `future_task` 工具（主动 Agent 链路）。保留：对话时间感知、AI 日程、日历、静态日程与人格日程
+
+测试：74 项。
+
 ## 2.2.0 — 2026-09-02
 
 ### 新增

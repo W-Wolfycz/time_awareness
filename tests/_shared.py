@@ -86,74 +86,9 @@ def install_astrbot_stubs():
                 self.temp = True
                 return self
 
-        class MessageChain:
-            def __init__(self, chain=None):
-                self.chain = list(chain or [])
-
-        class MessageEventResult:
-            def __init__(self):
-                self.chain = None
-
-            def set_result_content_type(self, content_type):
-                self.result_content_type = content_type
-
-        class Group:
-            def __init__(self, group_id=""):
-                self.group_id = group_id
-
-        class MessageMember:
-            def __init__(self, user_id=""):
-                self.user_id = user_id
-
-        class MessageSession:
-            def __init__(self, platform_id="", session_id="", message_type=None):
-                self.platform_id = platform_id
-                self.session_id = session_id
-                self.message_type = message_type
-
-            @classmethod
-            def from_str(cls, text):
-                parts = str(text or "").split(":", 2)
-                return cls(parts[0] if parts else "", parts[2] if len(parts) > 2 else "")
-
-        class _HandlersRegistry:
-            def get_handlers_by_event_type(self, event_type, plugins_name=None):
-                return []
-
         core = _module("astrbot.core")
         core.agent = _module("astrbot.core.agent")
         core.agent.message = _module("astrbot.core.agent.message", TextPart=TextPart)
-        core.message = _module("astrbot.core.message")
-        core.message.message_event_result = _module(
-            "astrbot.core.message.message_event_result",
-            MessageChain=MessageChain,
-            MessageEventResult=MessageEventResult,
-            ResultContentType=type("ResultContentType", (), {"LLM_RESULT": "llm_result"}),
-        )
-        core.platform = _module("astrbot.core.platform")
-        core.platform.astr_message_event = _module(
-            "astrbot.core.platform.astr_message_event",
-            AstrMessageEvent=type("AstrMessageEvent", (), {}),
-        )
-        core.platform.astrbot_message = _module(
-            "astrbot.core.platform.astrbot_message",
-            AstrBotMessage=type("AstrBotMessage", (), {}),
-            Group=Group,
-            MessageMember=MessageMember,
-        )
-        core.platform.message_session = _module(
-            "astrbot.core.platform.message_session", MessageSession=MessageSession
-        )
-        core.platform.message_type = _module(
-            "astrbot.core.platform.message_type",
-            MessageType=type("MessageType", (), {"GROUP_MESSAGE": "group_message"}),
-        )
-        core.star = _module("astrbot.core.star")
-        core.star.star_handler = _module(
-            "astrbot.core.star.star_handler",
-            EventType=type("EventType", (), {"OnDecoratingResultEvent": "on_decorating_result"}),
-            star_handlers_registry=_HandlersRegistry(),
-        )
 
     if "quart" not in sys.modules:
         class _Request:
@@ -183,13 +118,9 @@ class FakeContext:
 class FakeEvent:
     """满足 ``AstrMessageEvent`` 接口的最小事件桩。"""
 
-    def __init__(self, unified_msg_origin="", message_str="", sender_id=""):
+    def __init__(self, unified_msg_origin="", message_str=""):
         self.unified_msg_origin = unified_msg_origin
         self.message_obj = types.SimpleNamespace(message_str=message_str)
-        self._sender_id = sender_id
 
     def get_extra(self, key, default=False):
         return default
-
-    def get_sender_id(self):
-        return self._sender_id

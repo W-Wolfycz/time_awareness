@@ -64,51 +64,6 @@ def clip_slots(
     return result
 
 
-def subtract_slots(
-    base: Iterable[dict],
-    blockers: Iterable[dict],
-) -> list[dict]:
-    """``base`` 时段减去 ``blockers`` 的覆盖区间，返回剩余片段。"""
-    blockers_list = []
-    for blocker in blockers or []:
-        if not isinstance(blocker, dict):
-            continue
-        try:
-            start, end = slot_minutes(blocker)
-        except (ScheduleValidationError, ValueError):
-            continue
-        blockers_list.extend(_day_segments(start, end))
-    blockers_list.sort()
-
-    result = []
-    for slot in base or []:
-        if not isinstance(slot, dict):
-            continue
-        try:
-            start, end = slot_minutes(slot)
-        except (ScheduleValidationError, ValueError):
-            continue
-        segments = _day_segments(start, end)
-        if not segments:
-            continue
-        for block_start, block_end in blockers_list:
-            next_segments = []
-            for seg_start, seg_end in segments:
-                if block_end <= seg_start or block_start >= seg_end:
-                    next_segments.append((seg_start, seg_end))
-                    continue
-                if seg_start < block_start:
-                    next_segments.append((seg_start, min(block_start, seg_end)))
-                if block_end < seg_end:
-                    next_segments.append((max(block_end, seg_start), seg_end))
-            segments = next_segments
-            if not segments:
-                break
-        for seg_start, seg_end in segments:
-            result.append(_copy_with_minutes(slot, seg_start, seg_end))
-    return result
-
-
 def merge_future_layers(
     user: Iterable[dict],
     ai: Iterable[dict],

@@ -189,7 +189,7 @@ class DailyScheduleGeneration:
         """生成当天日程；persona 由 service 层同源传入，forecast 为目标日天气基调。"""
         policy = await self.policy()
         enhanced = enhanced or EnhancedContext()
-        provider_id = await self._resolve_provider_id(session)
+        provider_id = await self._resolve_provider_id()
         persona_prompt = await self._resolve_persona_prompt(session, persona)
         sensors = self.time_context.build_generation_sensor_snapshot(now=now)
         logger.debug(
@@ -368,7 +368,7 @@ class DailyScheduleGeneration:
                 calls += 1
                 result, _ = await generate_daily_schedule(
                     self.context, provider_id=provider_id, prompt=prompt,
-                    max_slots=self.max_slots())
+                )
                 return result, calls, (["planning:retried"] if attempt else [])
             except Exception as exc:
                 if attempt + 1 >= policy.max_attempts:
@@ -468,7 +468,7 @@ class DailyScheduleGeneration:
                     calls += 1
                     result, _ = await generate_daily_schedule(
                         self.context, provider_id=provider_id, prompt=base_prompt,
-                        max_slots=self.max_slots())
+                    )
                     return {"index": index, "slots": result.slots}, calls, ""
                 except Exception as exc:
                     if not first_error:
@@ -807,7 +807,7 @@ class DailyScheduleGeneration:
 
     # ---------------- Provider / Persona ----------------
 
-    async def _resolve_provider_id(self, session: str) -> str:
+    async def _resolve_provider_id(self) -> str:
         """解析生成 Provider：ai_daily.provider_id → 全局 default_provider_id。"""
         generation_config = self._generation_config()
         provider_id = str(generation_config.get("provider_id", "") or "").strip()

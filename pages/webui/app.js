@@ -1,4 +1,4 @@
-// time_awareness WebUI：5 个 view，vanilla JS 无框架
+// time_awareness WebUI：4 个 view，vanilla JS 无框架
 const PLUGIN_NAME = 'time_awareness';
 
 // 兼容 AstrBot 主 webui 注入的 bridge；缺失时降级 fetch（用相对路径）
@@ -8,9 +8,7 @@ const state = {
   currentView: 'dashboard',
   calendar: { year: 0, month: 0, token: 0 }, // token 防止快速翻月时旧响应覆盖新月份
   stats: null,
-  tasks: [],
   about: null,
-  taskOptions: null, // { sessions, now_iso, tz_label, default_fire_at_local }
   staticSchedules: {
     loaded: false,
     revision: '',
@@ -37,7 +35,6 @@ const state = {
 const VIEW_TITLES = {
   dashboard: '概览',
   calendar: '日历',
-  tasks: '任务',
   'static-schedules': '静态日程',
   schedules: '人格日程',
 };
@@ -75,10 +72,6 @@ const api = {
   getAbout: () => apiGet('about'),
   getStats: () => apiGet('dashboard/stats'),
   getMonth: (year, month) => apiGet('calendar/month', { year, month }),
-  getTasks: () => apiGet('tasks/list'),
-  cancelTask: (task_id) => apiPost('tasks/cancel', { task_id }),
-  getTaskOptions: () => apiGet('tasks/options'),
-  createTask: (payload) => apiPost('tasks/create', payload),
   getSchedulePersonas: () => apiGet('schedules/personas'),
   getScheduleDetail: (persona_hash, date, timezone) =>
     apiGet('schedules/detail', { persona_hash, date, timezone }),
@@ -143,7 +136,6 @@ async function refreshCurrentView() {
   switch (state.currentView) {
     case 'dashboard': return renderDashboard();
     case 'calendar': return renderCalendar();
-    case 'tasks': return renderTasks();
     case 'static-schedules': return renderStaticSchedules();
     case 'schedules': return renderSchedules();
   }
@@ -242,33 +234,10 @@ async function renderDashboard() {
           <div class="metric-sub">含 builtin + custom</div>
         </div>
         <div class="metric-card">
-          <div class="metric-label">待触发任务</div>
-          <div class="metric-value">${escapeHtml(String(s.task_pending_total ?? 0))}</div>
-          <div class="metric-sub">日历 ${escapeHtml(String(s.task_calendar_pending ?? 0))} · 后续 ${escapeHtml(String(s.task_followup_pending ?? 0))} · 手动 ${escapeHtml(String(s.task_user_pending || 0))}${s.task_retry_wait ? ' · 重试 ' + escapeHtml(String(s.task_retry_wait)) : ''}${s.task_failed_total ? ' · 失败 ' + escapeHtml(String(s.task_failed_total)) : ''}</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">近 7 天任务</div>
-          <div class="metric-value">${escapeHtml(String(s.near_7d_task_count ?? 0))}</div>
-          <div class="metric-sub">即将触发</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">下个任务</div>
-          <div class="metric-value" style="font-size: 20px;">${escapeHtml(s.next_task_display)}</div>
-          <div class="metric-sub">最近一条 pending</div>
-        </div>
-        <div class="metric-card">
           <div class="metric-label">日历功能</div>
           <div class="metric-value" style="font-size: 20px;">
             <span class="badge ${s.calendar_enabled ? 'badge-success' : 'badge-warning'}">
               ${s.calendar_enabled ? '已启用' : '未启用'}
-            </span>
-          </div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">主动提醒</div>
-          <div class="metric-value" style="font-size: 20px;">
-            <span class="badge ${s.reminder_enabled ? 'badge-success' : 'badge-warning'}">
-              ${s.reminder_enabled ? '已启用' : '未启用'}
             </span>
           </div>
         </div>
@@ -561,242 +530,6 @@ function showDayModal(year, month, day, events) {
   document.getElementById('day-modal').classList.add('active');
 }
 
-function taskKindBadge(kind) {
-  if (kind === 'calendar') return '<span class="badge badge-primary">日历</span>';
-  if (kind === 'user') return '<span class="badge badge-success">手动</span>';
-  return '<span class="badge badge-warning">后续</span>';
-}
-
-function taskHintDisplay(t) {
-  return t.hint ? escapeHtml(t.hint) : '<span style="color: var(--text-muted);">—</span>';
-}
-
-function taskSessionCell(t) {
-  return `<td data-label="会话"><code style="font-family: var(--mono); font-size: 12px; color: var(--text-muted); word-break: break-all;">${escapeHtml(t.session)}</code></td>`;
-}
-
-async function renderTasks() {
-  const wrap = document.getElementById('tasks-content');
-  try {
-    const resp = await api.getTasks();
-    if (!resp.success) throw new Error(resp.error || '获取任务失败');
-    state.tasks = resp.tasks;
-    const finished = Array.isArray(resp.finished) ? resp.finished : [];
-
-    if (state.tasks.length === 0 && finished.length === 0) {
-      wrap.innerHTML = `<div class="empty-state">暂无任务</div>`;
-      return;
-    }
-
-    const rows = state.tasks.map(t => {
-      const kindBadge = taskKindBadge(t.kind);
-      const targetInfo = t.target_user_id
-        ? ` → <code style="font-family: var(--mono); color: var(--text-muted);">${escapeHtml(t.target_user_id)}</code>`
-        : '';
-      const hintDisplay = taskHintDisplay(t);
-      const retryBadge = t.status === 'retry_wait'
-        ? `<span class="badge badge-warning" title="已尝试 ${Number(t.attempts || 0)} 次">等待重试</span>`
-        : '';
-      const fireDisplay = t.status === 'retry_wait' && t.next_retry_at_iso
-        ? `${escapeHtml(formatIsoLocal(t.next_retry_at_iso))}<div style="font-size:11px;color:var(--text-muted);">原定 ${escapeHtml(formatIsoLocal(t.fire_at_iso))}</div>`
-        : escapeHtml(formatIsoLocal(t.fire_at_iso));
-      return `
-        <tr>
-          <td data-label="类型">${kindBadge} ${retryBadge}</td>
-          <td data-label="触发时间" class="col-time">${fireDisplay}</td>
-          ${taskSessionCell(t)}
-          <td data-label="内容">${hintDisplay}${targetInfo}</td>
-          <td data-label="操作" class="col-actions">
-            <button class="btn btn-danger btn-sm" data-cancel-id="${escapeAttr(t.id)}">取消</button>
-          </td>
-        </tr>
-      `;
-    }).join('');
-
-    const statusMeta = {
-      sent: { cls: 'badge-success', label: '已发送' },
-      failed: { cls: 'badge-danger', label: '失败' },
-      cancelled: { cls: 'badge-muted', label: '已取消' },
-      expired: { cls: 'badge-warning', label: '已过期' },
-    };
-
-    const finishedRows = finished.map(t => {
-      const kindBadge = taskKindBadge(t.kind);
-      const meta = statusMeta[t.status] || { cls: 'badge-muted', label: escapeHtml(t.status) };
-      const hintDisplay = taskHintDisplay(t);
-      const errorDisplay = t.last_error
-        ? `<div style="font-size:11px;color:var(--danger, #e5484d);" title="${escapeAttr(t.last_error)}">${escapeHtml(String(t.last_error).slice(0, 60))}</div>`
-        : '';
-      return `
-        <tr class="row-finished">
-          <td data-label="类型">${kindBadge} <span class="badge ${meta.cls}">${meta.label}</span></td>
-          <td data-label="触发时间" class="col-time">${escapeHtml(formatIsoLocal(t.fire_at_iso))}</td>
-          <td data-label="结束时间" class="col-time">${escapeHtml(formatIsoLocal(t.terminal_at_iso))}</td>
-          ${taskSessionCell(t)}
-          <td data-label="内容">${hintDisplay}${errorDisplay}</td>
-        </tr>
-      `;
-    }).join('');
-
-    const finishedSection = finished.length
-      ? `
-        <h3 class="tasks-subtitle">已结束（保留 ${escapeHtml(String(resp.retention_days ?? 7))} 天内）</h3>
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>类型</th>
-                <th>触发时间</th>
-                <th>结束时间</th>
-                <th>会话</th>
-                <th>内容</th>
-              </tr>
-            </thead>
-            <tbody>${finishedRows}</tbody>
-          </table>
-        </div>
-      `
-      : '';
-
-    wrap.innerHTML = `
-      ${state.tasks.length
-        ? `<div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>类型</th>
-                  <th>触发时间</th>
-                  <th>会话</th>
-                  <th>内容</th>
-                  <th class="col-actions">操作</th>
-                </tr>
-              </thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>`
-        : `<div class="empty-state">暂无待触发任务</div>`}
-      ${finishedSection}
-    `;
-
-    wrap.querySelectorAll('[data-cancel-id]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const taskId = btn.dataset.cancelId;
-        const task = state.tasks.find(t => t.id === taskId);
-        if (!task) return;
-        askCancelTask(task);
-      });
-    });
-  } catch (e) {
-    wrap.innerHTML = errorStateHtml(e.message);
-  }
-}
-
-function askCancelTask(task) {
-  let detail;
-  const hint = escapeHtml(task.hint || '—');
-  if (task.kind === 'calendar') {
-    detail = `日历提醒（${formatIsoLocal(task.fire_at_iso)}）`;
-  } else if (task.kind === 'user') {
-    detail = `手动提醒（${formatIsoLocal(task.fire_at_iso)}）：${hint}`;
-  } else {
-    detail = `后续任务（${formatIsoLocal(task.fire_at_iso)}）：${hint}`;
-  }
-  showConfirm('取消此任务？', detail, async () => {
-    try {
-      const resp = await api.cancelTask(task.id);
-      if (!resp.success) {
-        toast('error', resp.error || '取消失败');
-        return;
-      }
-      toast('success', '任务已取消');
-      renderTasks();
-      renderDashboard().catch(() => {});
-    } catch (e) {
-      toast('error', `取消失败: ${e.message}`);
-    }
-  });
-}
-
-async function openCreateTaskModal() {
-  let opts;
-  try {
-    const resp = await api.getTaskOptions();
-    if (!resp.success) throw new Error(resp.error || '获取选项失败');
-    opts = resp;
-  } catch (e) {
-    toast('error', `无法加载选项：${e.message}`);
-    return;
-  }
-  state.taskOptions = opts;
-
-  if (!opts.sessions || opts.sessions.length === 0) {
-    toast('info', 'reminder_targets 为空，请先在配置里添加白名单会话');
-    return;
-  }
-
-  const sel = document.getElementById('tf-session');
-  sel.innerHTML = opts.sessions
-    .map(s => `<option value="${escapeAttr(s)}">${escapeHtml(s)}</option>`)
-    .join('');
-  document.getElementById('tf-fire').value = opts.default_fire_at_local;
-  document.getElementById('tf-tz-label').textContent = `(时区: ${opts.tz_label})`;
-  document.getElementById('tf-hint').value = '';
-  document.getElementById('tf-target').value = '';
-
-  document.getElementById('task-create-modal').classList.add('active');
-}
-
-async function submitCreateTask() {
-  const session = document.getElementById('tf-session').value;
-  const fire_at_local = document.getElementById('tf-fire').value;
-  const hint = document.getElementById('tf-hint').value.trim();
-  const target_user_id = document.getElementById('tf-target').value.trim();
-
-  if (!fire_at_local) { toast('error', '请填写触发时间'); return; }
-  if (!hint) { toast('error', '请填写提醒内容'); return; }
-
-  // 用 server_now_ms 校正「无时区字符串」的浏览器本地偏移；余量 90s 比后端 60s 严格
-  const opts = state.taskOptions || {};
-  let browserOffset = 0;
-  if (opts.server_now_ms && opts.default_fire_at_local) {
-    browserOffset = Date.parse(opts.default_fire_at_local) -
-      (Number(opts.server_now_ms) + 10 * 60 * 1000);
-  }
-  const fireMs = Date.parse(fire_at_local);
-  const realNowMs = Date.now();
-  if (!isNaN(fireMs) && fireMs - browserOffset - realNowMs < 90000) {
-    toast(
-      'error',
-      '触发时间距当前过近（弹窗默认时间是打开时算的 +10 分钟，停留过久会被追上）。' +
-      `当前浏览器时间 ${new Date(realNowMs).toLocaleTimeString()}，请重新选一个至少 1 分钟后的时刻`
-    );
-    return;
-  }
-
-  const submitBtn = document.getElementById('tf-submit');
-  submitBtn.disabled = true;
-  try {
-    const resp = await api.createTask({ session, fire_at_local, hint, target_user_id });
-    if (!resp.success) {
-      toast('error', resp.error || '创建失败');
-      return;
-    }
-    document.getElementById('task-create-modal').classList.remove('active');
-    toast('success', '任务已创建');
-    renderTasks();
-    renderDashboard().catch(() => {});
-  } catch (e) {
-    toast('error', `创建失败：${e.message}`);
-  } finally {
-    submitBtn.disabled = false;
-  }
-}
-
-function closeCreateTaskModal() {
-  document.getElementById('task-create-modal').classList.remove('active');
-}
-
-/** 自定义 hover tooltip：跟随鼠标位置，无浏览器原生 1-2s 延迟 */
 let _chipTooltipEl = null;
 
 function ensureChipTooltip() {
@@ -1681,8 +1414,6 @@ function bindNav() {
   });
   bindModalOverlayClose('day-modal', () => document.getElementById('day-modal').classList.remove('active'));
   bindModalOverlayClose('confirm-modal', () => document.getElementById('confirm-modal').classList.remove('active'));
-  document.getElementById('task-create-btn').addEventListener('click', openCreateTaskModal);
-  document.getElementById('tf-cancel').addEventListener('click', closeCreateTaskModal);
   const applyScheduleIdentity = (personaKey, identityValue, rebuildDates) => {
     if (rebuildDates) {
       const persona = state.schedules.personas.find(p => p.key === personaKey);
@@ -1757,8 +1488,6 @@ function bindNav() {
   document.getElementById('sf-cancel').addEventListener('click', closeStaticSlotModal);
   document.getElementById('sf-submit').addEventListener('click', applyStaticSlotModal);
   bindModalOverlayClose('static-slot-modal', closeStaticSlotModal);
-  document.getElementById('tf-submit').addEventListener('click', submitCreateTask);
-  bindModalOverlayClose('task-create-modal', closeCreateTaskModal);
   window.addEventListener('beforeunload', (event) => {
     if (!state.schedules.dirty && !state.staticSchedules.dirty) return;
     event.preventDefault();

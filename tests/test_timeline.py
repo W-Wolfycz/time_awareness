@@ -4,14 +4,11 @@
 用户覆盖裁剪与占位符卫生；完整行为覆盖见历史测试（git 34223ec）。
 """
 
-import datetime
-
 from time_awareness.domain.schedule import normalize_static_slots, parse_time
 from time_awareness.domain.timeline import (
     advance_executed,
     merge_future_layers,
     render_effective_timeline,
-    subtract_slots,
 )
 
 
@@ -202,18 +199,6 @@ def test_render_empty_ai_with_static_still_renders_static():
 
 
 # ==================== 用户覆盖裁剪与跨午夜 ====================
-
-
-def test_subtract_splits_and_remerges():
-    """用户覆盖把 AI 段切成两半；完全覆盖为空；无重叠原样。"""
-    base = [_slot("午间", "12:00", "14:00")]
-    result = subtract_slots(base, [_slot("用户", "12:30", "13:30")])
-    assert [(s["start"], s["end"]) for s in result] == [
-        ("12:00", "12:30"),
-        ("13:30", "14:00"),
-    ]
-    assert subtract_slots(base, [_slot("用户", "12:00", "14:00")]) == []
-    assert len(subtract_slots(base, [_slot("用户", "09:00", "10:00")])) == 1
 
 
 def test_cross_midnight_merge_advance_render():
