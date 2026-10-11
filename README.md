@@ -6,7 +6,7 @@
 
 - 时间引导：让角色用“刚才”“大半夜”“好久不见”等自然表达时间。
 - 单日日程表：静态日程配置 + 按 Persona 每天自动生成、按时间冻结的 AI 日程快照（同一 Persona 的多个 Bot 共享）；用户可通过 WebUI 覆盖未来时段。
-- 时间传感器：工作日、农历、黄历、现实日历事件、上次对话间隔。
+- 时间传感器：工作日、农历、黄历、现实日历事件、上次对话间隔，以及可选的未来 N 天日程预告。
 - AI 日历：按世界观生成全年节日、纪念日和季节事项。
 - Plugin Page：概览（含「查看今日随机天气」）、日历、静态日程管理，以及「人格日程」查看 + 用户覆盖层编辑；其他低频配置仍使用 AstrBot 主配置页。
 
@@ -24,6 +24,7 @@ AstrBot 主配置页采用渐进显示：日程、AI 日程、自适应增强和
 |---|---|---|
 | `time_guidance_enabled` | 时间规则、现实时间和动态感知总开关 | `true` |
 | `time_sensors` | 时间传感器多选：`workday` 工作日、`lunar` 农历、`almanac` 黄历；勾选任意一项即启用，全部不选则都不注入 | `["workday", "lunar"]` |
+| `upcoming_days` | 未来日程预告天数（1–14）：逐日注入日期、星期、工作日性质与当天事项，供模型回答「明天/后天」的安排；`0` 关闭。事项段要求开启日历且该年内置日历已完整生成，否则整段省略（见「动态注入」） | `0` |
 | `last_chat_enabled` | 上次对话间隔感知（独立开关）；ChatMemory 实际接管本轮时自动省略重复标签，但继续记录 | `true` |
 | `use_astrbot_timezone` | 跟随 AstrBot 全局时区 | `false` |
 | `timezone` | IANA 时区名 | `""` |
@@ -103,8 +104,11 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 <LUNAR_STATE>农历日期</LUNAR_STATE>
 <ALMANAC_STATE>黄历信息</ALMANAC_STATE>
 <TODAY_EVENTS>当天事项</TODAY_EVENTS>
+<UPCOMING_DAYS>未来日程预告</UPCOMING_DAYS>
 <LAST_CHAT>上次对话间隔</LAST_CHAT>
 ```
+
+`<UPCOMING_DAYS>` 仅在配置了 `upcoming_days` 时出现，每行一天：`明天 09-26 工作日性质：事项`。前三行带「明天/后天/大后天」标记，其后只给日期；确认无事项写「无事项」。事项段要求 `calendar.enable_calendar` 开启且该年启用的内置分类都已生成——关闭、跨年尚未重生成，或某分类为空（例如 `chinese_calendar` 未覆盖该年导致法定节假日缺失）时整段省略，表示事项未知而非「没有事项」。
 
 `<SCHEDULE_STATE>` 在日程未启用或未命中时为“无固定安排（按人设自然演绎）”；`<WEATHER>` 仅在启用随机天气时出现；其他标签在没有数据或关闭对应传感器时省略。普通消息链使用临时 `extra_user_content_parts`。ChatMemory takeover contexts 已逐条携带 `<cm_time>`，所以它实际接管本轮请求时不会重复注入 `<LAST_CHAT>`；本地时间记录仍继续维护。
 

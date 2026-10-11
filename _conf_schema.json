@@ -3,7 +3,7 @@
     "description": "🤖 日志区分机器人实例",
     "type": "bool",
     "default": false,
-    "hint": "多 Bot 时在日志前缀区分平台实例（[time_awareness:bot-<self_id>]）；日志级别跟随 AstrBot 原生配置"
+    "hint": "多 Bot 时在日志前缀区分平台实例（[time_awareness][platform:平台ID]）；日志级别跟随 AstrBot 原生配置"
   },
   "runtime": {
     "description": "⚙️ 全局运行时参数",
@@ -51,6 +51,12 @@
           "lunar"
         ],
         "hint": "勾选即启用，全不选则都不注入。工作日｜农历｜黄历（黄历建议与农历同开）"
+      },
+      "upcoming_days": {
+        "description": "🔭 未来日程预告天数",
+        "type": "int",
+        "default": 0,
+        "hint": "注入未来 N 天的日期、星期、工作日性质（工作日/周末/调休/节假日）与当天事项，供模型回答「明天/后天」的安排；0=关闭，范围 1–14。事项段要求开启「日历事项设置」且该年内置日历已完整生成，否则整段省略（表示事项未知）"
       },
       "last_chat_enabled": {
         "description": "💬 上次对话时间感知",

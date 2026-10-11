@@ -17,6 +17,7 @@ from ..core.builtin_events import (
 from ..core.lunar_sensor import lunar_sensor
 from ..core.workday_sensor import workday_sensor
 from ..domain.schedule import find_active_static_slot
+from ..domain.upcoming import build_upcoming_text, normalize_upcoming_days
 from ..log import logger, tag
 from ..utils.time_utils import get_now
 
@@ -65,6 +66,7 @@ class TimeFacts:
     lunar: SensorFact
     almanac: SensorFact
     today_events: SensorFact
+    upcoming: SensorFact
     last_chat: SensorFact
 
     @property
@@ -169,6 +171,66 @@ class TimeFactsCollector:
         include_builtin = bool(self.enabled_builtin_categories())
         return self.calendar_store.today_text(now, include_builtin=include_builtin)
 
+    def upcoming_days(self) -> int:
+        """未来预告天数；0=关闭（超上限按安全上限截断）。"""
+        return normalize_upcoming_days(self._time_config().get("upcoming_days", 0))
+
+    def _classify_upcoming_day(self, day: datetime.date) -> tuple[str, str]:
+        # 生产传感器自带兜底，这里只防注入实现违约；逐日调用，故降级留 DEBUG
+        try:
+            return self._workday.classify(day)
+        except Exception as exc:
+            logger.debug(f"{tag()} 未来日程工作日判定失败 {day}: {type(exc).__name__}")
+            return ("unknown", "")
+
+    def _builtin_category_coverage(self) -> dict:
+        """年份 → 该年内置事件实际产出的分类集合；用于判断某天事项能否断言完整。"""
+        coverage: dict = {}
+        for event in getattr(self.calendar_store, "builtin_events", None) or []:
+            category = event.get("category")
+            if category:
+                coverage.setdefault(event.get("year"), set()).add(category)
+        return coverage
+
+    def _upcoming_events(
+        self, day: datetime.date, *, builtin_coverage: dict
+    ) -> list[str] | None:
+        """预告里的事项文本：None=不可知（整段省略），[]=确认无事项。
+
+        该年的启用分类没有全部生成出来时（跨年尚未重生成、chinese_calendar 未覆盖该年
+        导致法定节假日缺失等），事件列表天然不完整，此时不输出事项段——既不能断言
+        「无事项」，也不该把残缺列表当作完整信息。
+        """
+        if not self._calendar_config().get("enable_calendar", False):
+            return None
+        enabled_categories = self.enabled_builtin_categories()
+        if enabled_categories:
+            covered = builtin_coverage.get(day.year) or set()
+            if not set(enabled_categories) <= covered:
+                return None
+        events = self.calendar_store.events_for_date(
+            day.year, day.month, day.day, include_builtin=bool(enabled_categories)
+        )
+        texts = [str(event.get("text", "")).strip() for event in events]
+        return [text for text in texts if text]
+
+    def upcoming_text(self, *, now: datetime.datetime) -> str:
+        """未来 N 天逐日预告文本；天数≤0 返回空串。"""
+        days = self.upcoming_days()
+        if days <= 0:
+            return ""
+        builtin_coverage = self._builtin_category_coverage()
+
+        def _events_for_date(day: datetime.date):
+            return self._upcoming_events(day, builtin_coverage=builtin_coverage)
+
+        return build_upcoming_text(
+            today=now.date(),
+            days=days,
+            classify=self._classify_upcoming_day,
+            events_for_date=_events_for_date,
+        )
+
     def resolve_schedule(
         self,
         *,
@@ -270,6 +332,14 @@ class TimeFactsCollector:
             except Exception as exc:
                 today_events = SensorFact(True, False, error=type(exc).__name__)
 
+        upcoming = SensorFact(False, False)
+        if scope == "conversation" and self.upcoming_days() > 0:
+            try:
+                value = self.upcoming_text(now=now)
+                upcoming = SensorFact(True, bool(value), value=value)
+            except Exception as exc:
+                upcoming = SensorFact(True, False, error=type(exc).__name__)
+
         last_chat_enabled = self.last_chat_enabled() and include_last_chat
         last_chat = SensorFact(last_chat_enabled, False)
         if scope == "conversation" and last_chat_enabled and session:
@@ -286,5 +356,6 @@ class TimeFactsCollector:
             lunar=lunar,
             almanac=almanac,
             today_events=today_events,
+            upcoming=upcoming,
             last_chat=last_chat,
         )

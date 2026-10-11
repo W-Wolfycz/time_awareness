@@ -49,7 +49,7 @@ def test_get_about_returns_metadata():
     assert resp == {
         "success": True,
         "name": "time_awareness",
-        "version": "v2.3.0",
+        "version": "v2.3.1",
         "display_name": "TimeAwareness",
         "author": "Wolfycz",
     }

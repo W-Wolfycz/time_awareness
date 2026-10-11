@@ -124,3 +124,10 @@ class FakeEvent:
 
     def get_extra(self, key, default=False):
         return default
+
+
+class FakeLastChatTracker:
+    """上次对话记录桩：``summary`` 恒为空（不关心间隔的用例复用）。"""
+
+    def summary(self, session, now):
+        return ""

@@ -1,4 +1,4 @@
 pyyaml>=6.0
-chinese_calendar>=1.10.0
+chinese_calendar>=1.11.0
 lunar_python>=1.4.0
 tzdata>=2025.2; platform_system == "Windows"

@@ -94,6 +94,8 @@ class TimeContextService:
             parts.append(f"<ALMANAC_STATE>{facts.almanac.value}</ALMANAC_STATE>")
         if facts.today_events.available and facts.today_events.value:
             parts.append(f"<TODAY_EVENTS>{facts.today_events.value}</TODAY_EVENTS>")
+        if facts.upcoming.available and facts.upcoming.value:
+            parts.append(f"<UPCOMING_DAYS>{facts.upcoming.value}</UPCOMING_DAYS>")
         if facts.last_chat.available:
             parts.append(f"<LAST_CHAT>{facts.last_chat.value}</LAST_CHAT>")
         return "\n".join(parts)

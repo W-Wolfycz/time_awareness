@@ -12,14 +12,11 @@ from time_awareness.core.builtin_events import (
     CATEGORY_TRADITIONAL,
 )
 from time_awareness.core.calendar_store import CalendarStore
+from time_awareness.core.workday_sensor import workday_sensor
 from time_awareness.services.time_facts_service import TimeFactsCollector
+from time_awareness.tests._shared import FakeLastChatTracker
 
 NOW = datetime.datetime(2026, 8, 11, 7, 30, tzinfo=datetime.timezone.utc)
-
-
-class _LastChat:
-    def summary(self, session, now):
-        return ""
 
 
 def _collector(config, calendar_store=None):
@@ -27,7 +24,7 @@ def _collector(config, calendar_store=None):
         config=config,
         astrbot_config_provider=lambda: None,
         calendar_store=calendar_store or CalendarStore(),
-        last_chat_tracker=_LastChat(),
+        last_chat_tracker=FakeLastChatTracker(),
         now_provider=lambda: NOW,
     )
 
@@ -77,7 +74,10 @@ def test_today_events_text():
 def test_collect_keys_flags_and_scope():
     config = {"time_awareness": {"time_sensors": ["workday", "lunar", "almanac"]}}
     facts = _collector(config).collect(scope="dashboard")
-    keys = {"now", "schedule", "workday", "lunar", "almanac", "today_events", "last_chat"}
+    keys = {
+        "now", "schedule", "workday", "lunar", "almanac",
+        "today_events", "upcoming", "last_chat",
+    }
     assert set(asdict(facts)) == keys
     assert facts.now == NOW
     assert facts.workday.enabled and facts.lunar.enabled and facts.almanac.enabled
@@ -87,3 +87,13 @@ def test_collect_keys_flags_and_scope():
         assert sensor.enabled is False and sensor.available is False
     with pytest.raises(ValueError):
         _collector({}).collect(scope="bogus")
+
+
+def test_workday_kinds_distinguish_weekend_from_holiday():
+    # 普通周末被算成「节假日」会让模型按节日庆祝（且「周末」标签永远不会出现）；
+    # 只有带节日名的休息日才是节假日，调休上班的周末是第三种
+    assert workday_sensor.classify(datetime.date(2026, 10, 17)) == ("weekend", "周末（周六）")
+    assert workday_sensor.classify(datetime.date(2026, 10, 1)) == ("holiday", "节假日（周四）")
+    assert workday_sensor.classify(datetime.date(2026, 10, 10)) == ("adjusted", "调休工作日（周六）")
+    assert workday_sensor.classify(datetime.date(2026, 10, 12)) == ("workday", "工作日（周一）")
+    assert workday_sensor.classify(datetime.date(2026, 10, 16)) == ("workday", "工作日（周五）")
