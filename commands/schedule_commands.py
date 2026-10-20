@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import datetime
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from ..domain.plan import PLAN_MAX_PRE_GENERATE_DAYS, plan_days_ahead
 from ..domain.schedule import (
     find_active_daily_slot,
     find_active_static_slot,
     sort_static_slots,
 )
 from ..log import logger, tag
+
+
+def describe_day_offset(offset: int) -> str:
+    """0/1/2 → 今天/明天/后天；更远的用日期，避免"大后天"再往下没有词。"""
+    return {0: "今天", 1: "明天", 2: "后天"}.get(offset, f"+{offset} 天")
 
 
 class ScheduleCommands:
@@ -37,7 +44,7 @@ class ScheduleCommands:
             "[time_awareness 日程表命令]\n"
             "/schedule show  — 查看当前 Persona 今天实际使用的日程\n"
             "/schedule static  — 查看静态日程表\n"
-            "/schedule regenerate  — 重新生成当前 Persona 的今日 AI 日程（管理员）\n"
+            "/schedule regenerate [天数|all]  — 重新生成今日（默认）/ 前 N 天 / 整个注入窗口的 AI 日程（管理员）\n"
             "/schedule help  — 显示本帮助\n"
             "\n"
             "说明：\n"
@@ -52,7 +59,7 @@ class ScheduleCommands:
             "\n"
             "示例：\n"
             "/schedule show  — 查看今天实际命中的 AI/静态日程\n"
-            "/schedule regenerate  — 立即重做今天的 AI 日程\n"
+            "/schedule regenerate [天数|all]  — 立即重做今天的 AI 日程；带天数或 all 会串行补做后续天\n"
             "静态日程请在 time_awareness Plugin Page 编辑；AI 自动化请开启 daily_schedule.ai_daily"
         )
 
@@ -140,7 +147,20 @@ class ScheduleCommands:
             lines.append(self._static_slot_line(slot))
         return "\n".join(lines)
 
-    async def regenerate(self, session: str, *, event=None) -> AsyncIterator[str]:
+    def _regenerate_day_count(self, target: str) -> int:
+        """把参数解析成天数：空/1=今天，all=注入窗口天数，N=至少 N 天（不超过安全上限）。"""
+        raw = str(target or "").strip().lower()
+        if raw in {"", "1"}:
+            return 1
+        if raw in {"all", "全部"}:
+            return max(1, plan_days_ahead(self.daily_schedule_service.plan_horizon_hours()))
+        try:
+            days = int(raw)
+        except ValueError:
+            return 1
+        return max(1, min(PLAN_MAX_PRE_GENERATE_DAYS, days))
+
+    async def regenerate(self, session: str, *, event=None, target: str = "") -> AsyncIterator[str]:
         if not self.daily_schedule_service.enabled():
             logger.debug(f"{tag()} /schedule regenerate 被拒：AI 每日日程未启用")
             yield (
@@ -151,16 +171,42 @@ class ScheduleCommands:
         await self.daily_schedule_service.register_session_async(
             session, trigger=False, event=event
         )
-        logger.debug(f"{tag()} /schedule regenerate 开始: session={session}")
+        logger.debug(f"{tag()} /schedule regenerate 开始: session={session} target={target}")
         persona_name = await self.daily_schedule_service.resolve_session_persona_name(
             session, event=event
         )
-        if persona_name:
-            yield f"正在重新生成 Persona「{persona_name}」的今日 AI 日程，请稍候……"
+        who = f"Persona「{persona_name}」" if persona_name else "当前 Persona"
+        days = self._regenerate_day_count(target)
+        now = self._now()
+        if days == 1:
+            yield f"正在重新生成 {who} 的今日 AI 日程，请稍候……"
         else:
-            yield "正在重新生成当前 Persona 的今日 AI 日程，请稍候……"
-        result = await self.daily_schedule_service.generate_for_session(session, force=True)
-        if result.success:
+            yield f"正在重新生成 {who} 的 {days} 天日程（串行，逐日落盘），请稍候……"
+
+        total_slots = 0
+        for offset in range(days):
+            target_date = now.date() + datetime.timedelta(days=offset)
+            if days > 1:
+                label = describe_day_offset(offset)
+                yield f"· {label} {target_date.isoformat()} 生成中……（{offset + 1}/{days}）"
+            result = await self.daily_schedule_service.regenerate_for_date(
+                session, target_date, event=event, force=True
+            )
+            if not result.success:
+                old_snapshot = self.daily_schedule_service.get_snapshot_for_session(session)
+                suffix = "旧快照仍保留。" if old_snapshot else "该日继续使用静态日程。"
+                logger.warning(
+                    f"{tag()} /schedule regenerate 失败: date={target_date.isoformat()} "
+                    f"error={result.error_type}"
+                )
+                reason = result.message or result.error_type
+                yield f"❌ {target_date.isoformat()} 生成失败：{reason}。{suffix}"
+                if days == 1:
+                    return
+                break
+            total_slots += result.slot_count
+
+        if days == 1:
             source_label = "纯 AI" if result.source == "ai" else "AI + 静态日程"
             logger.info(
                 f"{tag()} /schedule regenerate 完成: slots={result.slot_count} source={result.source}"
@@ -170,9 +216,8 @@ class ScheduleCommands:
                 "使用 /schedule show 查看当前结果。"
             )
             return
-        old_snapshot = self.daily_schedule_service.get_snapshot_for_session(session)
-        suffix = "旧快照仍保留。" if old_snapshot else "当前继续使用静态日程。"
-        logger.warning(
-            f"{tag()} /schedule regenerate 失败: error={result.error_type} message={result.message}"
+        logger.info(f"{tag()} /schedule regenerate 完成: days={days} slots={total_slots}")
+        yield (
+            f"✅ 已重新生成 {days} 天日程，共 {total_slots} 段（逐日落盘，后一天参考前一天的收尾状态）。\n"
+            "使用 /schedule show 或对话里的日程计划查看结果。"
         )
-        yield f"生成失败：{result.message or result.error_type}。{suffix}"

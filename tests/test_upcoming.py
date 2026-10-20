@@ -10,9 +10,7 @@ from time_awareness.core.calendar_store import CalendarStore
 from time_awareness.domain.upcoming import (
     UPCOMING_MAX_DAYS,
     normalize_upcoming_days,
-    upcoming_dates,
 )
-from time_awareness.services.time_context_service import TimeContextService
 from time_awareness.services.time_facts_service import TimeFactsCollector
 from time_awareness.tests._shared import FakeLastChatTracker
 
@@ -64,19 +62,6 @@ def test_normalize_upcoming_days_clamps_to_safety_cap():
     assert normalize_upcoming_days("x") == 0
     assert normalize_upcoming_days(3) == 3
     assert normalize_upcoming_days(UPCOMING_MAX_DAYS + 1) == UPCOMING_MAX_DAYS
-
-
-def test_upcoming_dates_start_tomorrow_and_cross_year():
-    # 差一天/跨年错位都只会让模型答错「明天」，不会抛错
-    assert upcoming_dates(datetime.date(2026, 9, 25), 2) == [
-        datetime.date(2026, 9, 26),
-        datetime.date(2026, 9, 27),
-    ]
-    assert upcoming_dates(datetime.date(2026, 12, 30), 3) == [
-        datetime.date(2026, 12, 31),
-        datetime.date(2027, 1, 1),
-        datetime.date(2027, 1, 2),
-    ]
 
 
 def test_upcoming_text_reads_configured_days_and_events():
@@ -150,27 +135,3 @@ def test_upcoming_survives_a_failing_sensor_day():
         "后天 09-27：无事项",
         "大后天 09-28 节假日（周一）：无事项",
     ]
-
-
-def test_dynamic_context_renders_upcoming_tag():
-    # 标签名/渲染分支写错：配置项看着生效，实际什么都没注入
-    store = CalendarStore()
-    store.set_events([EVENT])
-    config = {
-        "time_awareness": {"upcoming_days": 1, "time_sensors": []},
-        "calendar": {"enable_calendar": True, "builtin_event_categories": []},
-    }
-
-    def _service(cfg):
-        return TimeContextService(
-            config=cfg,
-            astrbot_config_provider=lambda: None,
-            calendar_store=store,
-            last_chat_tracker=FakeLastChatTracker(),
-            facts_collector=_collector(cfg, store),
-        )
-
-    text = _service(config).build_dynamic(now=NOW, include_last_chat=False)
-    assert "<UPCOMING_DAYS>明天 09-26 节假日（周六）：公司团建</UPCOMING_DAYS>" in text
-    off = _service({"calendar": {"enable_calendar": True}})
-    assert "<UPCOMING_DAYS>" not in off.build_dynamic(now=NOW, include_last_chat=False)

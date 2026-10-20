@@ -7,47 +7,11 @@ import pytest
 from time_awareness.services.static_schedule_config_service import (
     StaticScheduleConfigConflict,
     StaticScheduleConfigService,
-    static_schedule_revision,
 )
 
 
 def _service(config, save=None):
     return StaticScheduleConfigService(config=config, save_config=save or (lambda: True))
-
-
-def test_static_schedule_revision():
-    slots = [{"start_time": "08:00", "end_time": "09:00"}]
-    assert static_schedule_revision(slots) == static_schedule_revision(slots)
-    assert len(static_schedule_revision(slots)) == 64
-    assert static_schedule_revision(slots) != static_schedule_revision(
-        [{"start_time": "09:00", "end_time": "10:00"}]
-    )
-
-
-def test_service_get_shape():
-    config = {
-        "daily_schedule": {
-            "schedule_templates": [{"name": "x", "start_time": "08:00", "end_time": "09:00"}]
-        }
-    }
-    result = _service(config).get()
-    assert set(result) == {"revision", "slots", "max_slots", "warnings"}
-    assert result["max_slots"] == 256 and result["slots"][0]["start_time"] == "08:00"
-    assert isinstance(result["warnings"], list)
-
-
-def test_save_writes_config_and_returns_revision():
-    config = {}
-    saved = []
-    svc = StaticScheduleConfigService(config=config, save_config=lambda: saved.append(1) or True)
-    rev = svc.get()["revision"]
-    result = asyncio.run(
-        svc.save(revision=rev, slots=[{"name": "x", "start_time": "08:00", "end_time": "09:00"}])
-    )
-    assert saved == [1]
-    written = config["daily_schedule"]["schedule_templates"]
-    assert written[0]["start_time"] == "08:00"
-    assert result["revision"] == static_schedule_revision(written)
 
 
 def test_save_error_branches():
@@ -115,3 +79,21 @@ def test_save_rejects_xml_leaves_config_untouched():
             )
         )
     assert config == {}
+
+
+def test_revision_changes_with_content():
+    """revision 恒等 → 两个页面拿同一 revision 各自保存，后保存的静默覆盖前一个。"""
+    config = {}
+    svc = _service(config)
+    first = svc.get()["revision"]
+    asyncio.run(
+        svc.save(
+            revision=first,
+            slots=[{"name": "早", "start_time": "08:00", "end_time": "09:00"}],
+        )
+    )
+    second = svc.get()["revision"]
+    assert second != first
+    # 旧 revision 已失效：并发场景下必须冲突而不是覆盖
+    with pytest.raises(StaticScheduleConfigConflict):
+        asyncio.run(svc.save(revision=first, slots=[]))

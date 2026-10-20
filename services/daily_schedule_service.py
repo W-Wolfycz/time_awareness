@@ -10,6 +10,15 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from ..domain.plan import (
+    clip_day_slots,
+    day_bounds,
+    join_slots,
+    plan_days_ahead,
+    plan_deadline,
+    render_plan_block,
+    resolve_plan_horizon,
+)
 from ..domain.schedule import (
     MINUTES_PER_DAY,
     ScheduleValidationError,
@@ -38,7 +47,6 @@ from .daily_schedule_generation import (
     exception_detail,
 )
 from ..log import logger, tag
-
 
 @dataclass(frozen=True)
 class ScheduleResolution:
@@ -115,6 +123,11 @@ class DailyScheduleService:
         # UMO 最后活跃时间（保活：一整天未出现的 UMO 删除；仅进程内存）
         self._session_active_at: dict[str, datetime.datetime] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # 上次回收内存表的时间：每日循环没跑时也要有别的入口兜底
+        self._last_gc: datetime.datetime | None = None
+        # 上次观察到的计划窗口（小时）：配置改大后据此立刻补缺天
+        self._observed_horizon: int | None = None
+        self._filling: bool = False
         self._tasks: dict[str, asyncio.Task] = {}
 
     def set_available(self, available: bool) -> None:
@@ -127,6 +140,10 @@ class DailyScheduleService:
 
     def _daily_config(self) -> dict:
         return ai_daily_config(self.config)
+
+    def plan_horizon_hours(self) -> int:
+        """计划注入窗口（小时）；0 关闭计划注入，上限 48。"""
+        return resolve_plan_horizon(self.config)
 
     def configured_enabled(self) -> bool:
         daily_schedule = self._daily_schedule_config()
@@ -291,6 +308,7 @@ class DailyScheduleService:
         self._representative_sessions[persona_hash] = session
         if trigger:
             self.queue_generation(session)
+            self.watch_plan_horizon()
         return persona_hash
 
     async def register_session_async(
@@ -307,6 +325,7 @@ class DailyScheduleService:
         session = str(session or "").strip()
         if not session:
             return ""
+        self._maybe_gc(self.time_context.now())
         resolved_id, persona = await self._resolve_persona(session, event)
         resolved_id = str(resolved_id or "").strip()
         if not resolved_id:
@@ -324,6 +343,14 @@ class DailyScheduleService:
         if trigger:
             self.queue_generation(session)
         return persona_hash
+
+    def _maybe_gc(self, now: datetime.datetime) -> None:
+        """按小时节流地回收会话表与过期生成锁（每日循环缺席时它们只增不减）。"""
+        if self._last_gc is not None and now - self._last_gc < datetime.timedelta(hours=1):
+            return
+        self._last_gc = now
+        self._expire_stale_sessions(now)
+        self._cleanup_stale_locks()
 
     def _mark_session_active(self, session: str, now: datetime.datetime | None = None) -> None:
         """登记/刷新 UMO 最后活跃时间（保活依据，仅进程内存）。"""
@@ -432,42 +459,95 @@ class DailyScheduleService:
             else None
         )
 
-    def today_schedule_summary(self, session: str, *, now=None) -> str | None:
-        """今日全天安排摘要（每段 HH:MM-HH:MM 名称）；无内容返回 None。"""
-        if not self.enabled() and not self._has_static_templates():
+    def done_summary(self, session: str, *, now=None) -> str | None:
+        """今天已经发生的段（冻结点之前，事实）；无内容返回 None。"""
+        if not self.enabled():
             return None
         now = now or self.time_context.now()
         snapshot = self.get_snapshot_for_session(session, now=now)
-        slots = self._render_snapshot(snapshot, now) if snapshot else self._static_summary_slots()
-        if not slots:
+        if not snapshot:
             return None
-        lines = []
-        for slot in slots:
-            if not isinstance(slot, dict):
-                continue
-            start = str(slot.get("start", "") or "").strip()
-            end = str(slot.get("end", "") or "").strip()
-            name = str(slot.get("name", "") or "").strip()[:24]
-            if not start or not end:
-                continue
-            lines.append(f"{start}-{end} {name}" if name else f"{start}-{end}")
-        return " | ".join(lines) or None
+        executed = [
+            slot
+            for slot in self._render_snapshot(snapshot, now)
+            if isinstance(slot, dict) and slot.get("origin") == "executed"
+        ]
+        return join_slots(executed)
+
+    def plan_summary(
+        self, session: str, *, now=None, horizon_hours: int | None = None
+    ) -> str | None:
+        """从此刻起所有未执行的段（今天剩余 + 未来天数），按天分段并裁到 horizon。
+
+        计划 ≠ 事实：这里只给"打算"，实际以届时发生的情况为准（说明句由注入块承担）。
+        """
+        horizon = self.plan_horizon_hours() if horizon_hours is None else int(horizon_hours)
+        if horizon <= 0 or (not self.enabled() and not self._has_static_templates()):
+            return None
+        now = now or self.time_context.now()
+        deadline = plan_deadline(now, horizon)
+        days: list[tuple[datetime.date, list[dict]]] = []
+        day = now.date()
+        while day <= deadline.date():
+            days.append((day, self._plan_slots_for_day(session, day, now, deadline)))
+            day += datetime.timedelta(days=1)
+        return render_plan_block(days, now)
+
+    def _plan_slots_for_day(
+        self,
+        session: str,
+        day: datetime.date,
+        now: datetime.datetime,
+        deadline: datetime.datetime,
+    ) -> list[dict]:
+        """某一天的未执行段：今天从此刻起、未来日全天，两端都裁到 [现在, deadline]。"""
+        bounds = day_bounds(day, now, deadline)
+        if bounds is None:
+            return []
+        start_bound, end_bound = bounds
+        return clip_day_slots(
+            self._unexecuted_slots_for_day(session, day, now),
+            start_bound=start_bound,
+            end_bound=end_bound,
+        )
+
+    def _unexecuted_slots_for_day(
+        self, session: str, day: datetime.date, now: datetime.datetime
+    ) -> list[dict]:
+        """某天的未执行时间线；没有快照时退回静态时段（兜底层）。"""
+        persona_hash = self._identity_for(session)
+        if persona_hash:
+            if day == now.date():
+                snapshot = self.get_snapshot_for_session(session, now=now)
+            else:
+                target_now = self._context_now_for_date(now, day)
+                snapshot = self.store.get(persona_hash, day, self._timezone_key(target_now))
+                if snapshot and not self._snapshot_usable(snapshot, target_now, persona_hash):
+                    snapshot = None
+            if snapshot:
+                if day == now.date():
+                    return [
+                        slot
+                        for slot in self._render_snapshot(snapshot, now)
+                        if isinstance(slot, dict) and slot.get("origin") != "executed"
+                    ]
+                # 未来日：按"当前"静态配置渲染（快照里的静态副本可能已过期），且不含已执行层
+                return render_effective_timeline(
+                    {**snapshot, "executed_slots": []},
+                    0,
+                    self._current_static_slots(),
+                    self._ai_priority_over_static(),
+                )
+        return self._static_summary_slots() if self._has_static_templates() else []
 
     def _has_static_templates(self) -> bool:
         templates = self._daily_schedule_config().get("schedule_templates")
         return bool(isinstance(templates, list) and templates)
 
     def _static_summary_slots(self) -> list[dict]:
-        templates = self._daily_schedule_config().get("schedule_templates")
-        return [
-            {
-                "start": str(s.get("start_time", "") or ""),
-                "end": str(s.get("end_time", "") or ""),
-                "name": str(s.get("name", "") or ""),
-            }
-            for s in templates
-            if isinstance(s, dict)
-        ]
+        """静态兜底时段；必须走 ``static_slots_from_config``，跨午夜段要先拆开，
+        否则 22:00-08:00 会被裁成 (1320, 480) 而整段丢弃。"""
+        return self._current_static_slots()
 
     def resolve(self, *, now: datetime.datetime, session: str) -> ScheduleResolution | None:
         """同步解析当前有效时间线；缺失或无效时由调用方使用静态日程。"""
@@ -1077,13 +1157,123 @@ class DailyScheduleService:
                 target_date = current.date() + datetime.timedelta(
                     days=target_day_offset
                 )
-                queued = await self.queue_known_profiles(target_date=target_date)
+                queued = 0
+                horizon = self.plan_horizon_hours()
+                days = plan_days_ahead(horizon)
+                for step in range(days):
+                    day_target = target_date + datetime.timedelta(days=step)
+                    queued += await self.queue_known_profiles(target_date=day_target)
+                    # 串行补天：次日的连续性要读前一天的收尾状态，必须等它落盘
+                    await self._wait_pending_generations()
                 logger.debug(
                     f"{tag()} 🗓️ AI 每日日程定时扫描完成: "
-                    f"target_date={target_date.isoformat()} queued={queued}"
+                    f"target_date={target_date.isoformat()} days={days} "
+                    f"horizon={horizon}h queued={queued}"
                 )
         except asyncio.CancelledError:
             logger.info(f"{tag()} AI 每日日程循环已取消")
+
+    def watch_plan_horizon(self) -> None:
+        """配置里的计划窗口变了就立刻补缺天（fire-and-forget），不必等下一次定时触发。
+
+        只有在"新窗口需要、但还没有快照"的天上才会真正生成：调小窗口不会重跑。
+        """
+        horizon = self.plan_horizon_hours()
+        if horizon == self._observed_horizon:
+            return
+        self._observed_horizon = horizon
+        if horizon <= 0 or not self.enabled() or self._filling:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 没有事件循环（同步上下文/测试）：留给下一次定时触发
+            return
+        loop.create_task(self._fill_missing_days())
+
+    async def _fill_missing_days(self) -> int:
+        """把当前窗口内缺的快照补齐（串行，保证次日连续性）。"""
+        self._filling = True
+        try:
+            now = self.time_context.now()
+            offset, _ = self._generation_offset(now)
+            days = plan_days_ahead(self.plan_horizon_hours())
+            queued = 0
+            for step in range(days):
+                target = now.date() + datetime.timedelta(days=offset + step)
+                queued += await self.queue_known_profiles(target_date=target)
+                await self._wait_pending_generations()
+            if queued:
+                logger.info(
+                    f"{tag()} 🗓️ 计划窗口变更（{self.plan_horizon_hours()}h）："
+                    f"已为缺天补生成 {queued} 个日程"
+                )
+            return queued
+        finally:
+            self._filling = False
+
+    def _generation_offset(self, now: datetime.datetime) -> tuple[int, str]:
+        """解析 ``generation_time`` 的 (天数偏移, 规范化的 HH:MM)。"""
+        hour, minute, offset = self._parse_generation_time(
+            self._daily_config().get("generation_time", "00:05")
+        )
+        return offset, f"{hour:02d}:{minute:02d}"
+
+    async def regenerate_for_date(
+        self,
+        session: str,
+        target_date: datetime.date,
+        *,
+        event: Any = None,
+        force: bool = True,
+    ) -> GenerationResult:
+        """重生成指定日期（force=清空未执行的用户层，与 /schedule regenerate 语义一致）。"""
+        if not self.enabled():
+            return GenerationResult(
+                False, error_type="disabled", message="AI 每日日程尚未启用", retryable=False
+            )
+        session = str(session or "").strip()
+        resolved_id, persona = await self._resolve_persona(session, event)
+        resolved_id = str(resolved_id or "").strip()
+        if not resolved_id:
+            self._drop_stale_identity(session)
+            return GenerationResult(
+                False,
+                error_type="persona_unavailable",
+                message="无法解析当前 Persona。AI 日程以 Persona 为隔离维度，请为会话配置生效人设后再试",
+                retryable=False,
+            )
+        now = self.time_context.now()
+        target_now = self._context_now_for_date(now, target_date)
+        persona_hash = self.store.persona_hash(resolved_id)
+        self._persona_cache[session] = (persona_hash, persona, resolved_id)
+        self._mark_session_active(session)
+        self._representative_sessions[persona_hash] = session
+        frozen = FrozenIdentity(
+            session=session,
+            persona_hash=persona_hash,
+            persona_id=resolved_id,
+            persona=persona,
+            timezone=self._timezone_key(target_now),
+            local_date=target_date,
+            now=now,
+        )
+        return await self.generate_for_session(frozen=frozen, force=force)
+
+    async def _wait_pending_generations(self, *, timeout: float = 600.0) -> None:
+        """等待进行中的生成任务结束（顺序补天时保证前一天已落盘）。
+
+        带超时：单个 provider 卡住时宁可跳过后续天，也不要让整条每日循环停在这里。
+        """
+        tasks = [task for task in self._tasks.values() if not task.done()]
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            logger.warning(
+                f"{tag()} ⚠️ 等待日程生成超时（{int(timeout)}s），"
+                f"仍有 {len(pending)} 个任务未结束，跳过后续预生成"
+            )
 
     async def close(self) -> None:
         tasks = [task for task in self._tasks.values() if not task.done()]

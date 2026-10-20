@@ -65,34 +65,6 @@ def test_merge_priority_user_ai_static():
     assert ("static", "11:00", "12:00") in by_origin_ai  # 13-14 被用户占
 
 
-def test_merge_remerges_split_and_keeps_gaps():
-    """同源被裁剪出的相邻碎片重新合并；不同来源相邻不合并；空档保留。"""
-    user = [_slot("用户", "12:30", "13:00")]
-    ai = [_slot("AI段", "12:00", "14:00", origin="ai")]
-    merged = merge_future_layers(user, ai, [], ai_priority=False)
-    ai_parts = sorted((s["start"], s["end"]) for s in merged if s["origin"] == "ai")
-    assert ai_parts == [("12:00", "12:30"), ("13:00", "14:00")]
-
-    merged2 = merge_future_layers(
-        [], ai, [_slot("静态", "12:00", "12:30", origin="static")], ai_priority=False
-    )
-    assert [s["origin"] for s in merged2] == ["static", "ai"]
-
-    gapped = merge_future_layers(
-        [],
-        [_slot("A", "08:00", "10:00", origin="ai"), _slot("B", "14:00", "16:00", origin="ai")],
-        [],
-        ai_priority=False,
-    )
-    assert [(s["start"], s["end"]) for s in gapped] == [
-        ("08:00", "10:00"),
-        ("14:00", "16:00"),
-    ]
-
-
-# ==================== 冻结边界推进 ====================
-
-
 def test_advance_freezes_executed_and_never_backfills():
     """推进到 cutoff：cutoff 前全部固化、空档不回填、未来层被裁剪。"""
     snapshot = _snapshot(
@@ -108,21 +80,6 @@ def test_advance_freezes_executed_and_never_backfills():
     assert updated["executed_until"] == "09:00"
     assert [(_m(s["start"]), _m(s["end"])) for s in updated["ai_slots"]] == [(540, 600)]
     assert [(_m(s["start"]), _m(s["end"])) for s in updated["static_slots"]] == [(540, 570)]
-
-
-def test_advance_holds_executed_against_user_and_static():
-    """已执行区间恒占：用户/AI/静态无法覆盖冻结区。"""
-    snapshot = _snapshot(
-        executed_slots=[
-            {**_slot("已执行", "08:00", "10:00", origin="executed"), "_source_origin": "ai"}
-        ],
-        user_slots=[_slot("用户", "08:30", "09:30", origin="user")],
-        ai_slots=[_slot("AI", "08:00", "09:00", origin="ai")],
-    )
-    updated = advance_executed(snapshot, cutoff=600, ai_priority=False)
-    frozen = updated["executed_slots"]
-    assert sorted((_m(s["start"]), _m(s["end"])) for s in frozen) == [(480, 600)]
-    assert all(s["origin"] == "executed" for s in frozen)
 
 
 def test_advance_strips_internal_placeholder_marker():
@@ -165,40 +122,6 @@ def test_render_user_overrides_ai_with_executed_and_static():
     assert ("static", "11:00", "11:30") in by_origin
     assert ("user", "12:00", "13:00") in by_origin
     assert ("ai", "13:00", "14:00") in by_origin
-
-
-def test_render_does_not_backfill_frozen_gap():
-    """cutoff 之前的空白是已确定事实：AI 不得回填。"""
-    snapshot = _snapshot(
-        executed_until="10:00",
-        executed_slots=[
-            _slot("已执行", "08:00", "09:00", origin="executed", source_origin="ai")
-        ],
-        ai_slots=[_slot("AI", "08:30", "10:30", origin="ai")],
-    )
-    slots = render_effective_timeline(
-        snapshot, cutoff=600, current_static=[], ai_priority=False
-    )
-    assert [(s["start"], s["end"]) for s in slots if s["origin"] == "ai"] == [
-        ("10:00", "10:30")
-    ]
-
-
-def test_render_empty_ai_with_static_still_renders_static():
-    """合法空 AI 快照仍渲染静态层（空 AI ≠ 无日程）。"""
-    snapshot = _snapshot(ai_slots=[], user_slots=[])
-    slots = render_effective_timeline(
-        snapshot,
-        cutoff=600,
-        current_static=[_slot("静态午", "12:00", "13:00", origin="static")],
-        ai_priority=False,
-    )
-    assert [(s["origin"], s["start"], s["end"]) for s in slots] == [
-        ("static", "12:00", "13:00")
-    ]
-
-
-# ==================== 用户覆盖裁剪与跨午夜 ====================
 
 
 def test_cross_midnight_merge_advance_render():

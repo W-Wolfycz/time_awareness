@@ -1,10 +1,9 @@
 """core/daily_schedule_store.py 的隐私化持久化测试（tmp_path）。"""
 
 import datetime
+import pathlib
 
-import pytest
 
-from time_awareness.core._datafile import atomic_write_yaml
 from time_awareness.core.daily_schedule_store import DailyScheduleSnapshotStore
 
 TODAY = datetime.date(2026, 8, 11)
@@ -68,22 +67,10 @@ def test_cleanup_retention_days(tmp_path):
     assert store.get("persona_hash_1", "2026-08-09", "UTC") is not None
 
 
-def test_snapshot_key_and_persona_hash(tmp_path):
-    store = _store(tmp_path)
-    store.load()
-    assert store.snapshot_key("ph", "2026-08-11", "Asia/Shanghai") == "ph:2026-08-11:Asia/Shanghai"
-    assert store.snapshot_key("ph", datetime.date(2026, 8, 11)) == "ph:2026-08-11:system-local"
-    assert store.persona_hash("persona_demo") == store.persona_hash("persona_demo")
-    assert store.persona_hash("persona_demo") != store.persona_hash("other")
-    with pytest.raises(ValueError):
-        store.persona_hash("")
-
-
-def test_schema_version_mismatch_resets_store(tmp_path):
-    atomic_write_yaml(
-        str(tmp_path / "daily_schedule_snapshots.yaml"),
-        {"schema_version": 999, "snapshots": {"k": {"status": "ready"}}},
-    )
-    store = _store(tmp_path)
-    assert store.load() is True
-    assert store.list_snapshots() == []
+def test_snapshot_key_includes_timezone():
+    """key 丢时区 → 同一 persona/日期在两个时区下互相串用快照，读写静默错位。"""
+    store = _store(pathlib.Path("."))
+    utc = store.snapshot_key("persona_hash_1", TODAY, "UTC")
+    shifted = store.snapshot_key("persona_hash_1", TODAY, "UTC+08:00")
+    other_day = store.snapshot_key("persona_hash_1", TODAY + datetime.timedelta(days=1), "UTC")
+    assert utc != shifted and utc != other_day

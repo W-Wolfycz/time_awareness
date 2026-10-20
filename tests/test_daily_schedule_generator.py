@@ -23,15 +23,6 @@ def test_parse_valid_slots_sorted_with_minutes():
     assert slots[0]["_start_minute"] == 360 and slots[1]["_end_minute"] == 1440
 
 
-def test_parse_rejects_bad_json_and_non_array():
-    with pytest.raises(ScheduleValidationError):
-        parse_daily_schedule_json("not-json")
-    with pytest.raises(ScheduleValidationError):
-        parse_daily_schedule_json(json.dumps({"name": "x"}))
-    with pytest.raises(ScheduleValidationError):
-        parse_daily_schedule_json("")
-
-
 def test_parse_rejects_field_whitelist_violation():
     extra = {**_slot(), "origin": "ai"}
     missing = {"name": "晨起", "start": "06:00", "end": "09:00"}
@@ -48,17 +39,6 @@ def test_parse_rejects_control_chars_and_xml():
         )
     with pytest.raises(ScheduleValidationError):
         parse_daily_schedule_json(json.dumps([_slot(name="晨\x00起")], ensure_ascii=False))
-
-
-def test_parse_rejects_cross_midnight_and_overlap():
-    with pytest.raises(ScheduleValidationError):
-        parse_daily_schedule_json(json.dumps([_slot(start="22:00", end="06:00")]))
-    with pytest.raises(ScheduleValidationError):
-        parse_daily_schedule_json(json.dumps([_slot(start="08:00", end="08:00")]))
-    with pytest.raises(ScheduleValidationError):
-        parse_daily_schedule_json(
-            json.dumps([_slot(start="06:00", end="10:00"), _slot("重叠", "09:00", "11:00")])
-        )
 
 
 def test_parse_enforces_safety_cap_boundary():

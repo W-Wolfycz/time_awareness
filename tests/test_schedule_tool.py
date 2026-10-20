@@ -239,8 +239,19 @@ def test_tool_list_update_delete_round_trip(tmp_path):
 
 
 def test_tool_write_uses_same_cutoff_as_server(tmp_path):
-    # 工具的冻结点若和服务端不同源，已结束的用户段会被当草稿重交 → 写入被拒或历史被改写
-    service, admin, _ = _build(tmp_path)
+    # 工具的冻结点若和服务端不同源：已结束的段被重交（被拒），或"刚好卡在冻结点"的段被静默丢掉（等于删除）
+    snapshot = _snapshot()
+    snapshot["user_slots"].append(
+        {
+            "name": "例会",
+            "start": "10:00",
+            "end": "11:00",
+            "state": "在开会",
+            "origin": "user",
+            "user_slot_id": "soon",
+        }
+    )
+    service, admin, _ = _build(tmp_path, snapshot=snapshot)
     result = asyncio.run(
         service.handle(
             session=SESSION,
@@ -253,10 +264,12 @@ def test_tool_write_uses_same_cutoff_as_server(tmp_path):
         )
     )
     assert "已新增时段" in result
-    snapshot = _stored(admin)
-    assert all(slot["name"] != "早饭" for slot in snapshot["user_slots"])
-    assert any(slot["name"] == "早饭" for slot in snapshot["executed_slots"])
-    assert any(slot["name"] == "看电影" for slot in snapshot["user_slots"])
+    stored = _stored(admin)
+    assert all(slot["name"] != "早饭" for slot in stored["user_slots"])
+    assert any(slot["name"] == "早饭" for slot in stored["executed_slots"])
+    # 冻结点 10:00：正好卡在边界的「例会」必须留在用户层（工具若用了更晚的冻结点会把它丢掉）
+    assert [slot["start"] for slot in stored["user_slots"] if slot["name"] == "例会"] == ["10:00"]
+    assert any(slot["name"] == "看电影" for slot in stored["user_slots"])
 
 
 def test_tool_requires_admin_when_configured(tmp_path):

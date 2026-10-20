@@ -58,6 +58,7 @@ AstrBot 主配置页采用渐进显示：日程、AI 日程、自适应增强和
 | `ai_daily.adaptive.allow_custom_theme` | 池内无合适项时允许自创主题/风格（禁「常规日」类空泛词）；关闭=严格池内 | `true` |
 | `ai_daily.ai_priority_over_static` | AI 优先于静态日程（关闭时静态优先）；不受 `adaptive.enabled` 控制 | `false` |
 | `ai_daily.allow_ai_edit` | 允许 AI 改写日程：给模型注入 `daily_schedule` 工具（查看日程并按「已过 / 可改 / 可覆写」增改删） | `false` |
+| `ai_daily.plan_horizon_hours` | 计划注入窗口（小时，0–48）；0=不注入 `<SCHEDULE_PLAN>`。预生成天数按触发模式与窗口自动反推——保证任一时刻的未来注入窗口都有计划日程（24h → 2 天、48h → 3 天） | `24` |
 | `ai_daily.edit_requires_admin` | 仅管理员可让 AI 改写日程；关闭时任何会话都能触发 | `false` |
 | `ai_daily.random_weather_enabled` | 启用随机天气：每天随机当日天气基调（白天/黑夜各一段），对话注入、日程生成参考 | `false` |
 | `ai_daily.weather_pool` | 天气权重池（每行「天气,权重」）；留空=内置默认 | 内置 7 种 |
@@ -104,7 +105,8 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 ```xml
 <SYSTEM_REMINDER>当前日期时间：YYYY-MM-DD HH:MM（时区），星期X</SYSTEM_REMINDER>
 <SCHEDULE_STATE>当前命中的角色状态</SCHEDULE_STATE>
-<TODAY_SCHEDULE>今日时段安排摘要</TODAY_SCHEDULE>
+<SCHEDULE_DONE>今天已经过去的时段</SCHEDULE_DONE>
+<SCHEDULE_PLAN>从此刻起的行程计划（按天分段）</SCHEDULE_PLAN>
 <WEATHER>今日天气基调</WEATHER>
 <WORKDAY_STATE>工作日性质</WORKDAY_STATE>
 <LUNAR_STATE>农历日期</LUNAR_STATE>
@@ -116,13 +118,15 @@ AI 每日日程以「当前生效 Persona + 本地日期」为作用域：同一
 
 `<UPCOMING_DAYS>` 仅在配置了 `upcoming_days` 时出现，每行一天：`明天 09-26 工作日性质：事项`。前三行带「明天/后天/大后天」标记，其后只给日期；确认无事项写「无事项」。事项段要求 `calendar.enable_calendar` 开启且该年启用的内置分类都已生成——关闭、跨年尚未重生成，或某分类为空（例如 `chinese_calendar` 未覆盖该年导致法定节假日缺失）时整段省略，表示事项未知而非「没有事项」。
 
-`<SCHEDULE_STATE>` 在日程未启用或未命中时为“无固定安排（按人设自然演绎）”；`<WEATHER>` 仅在启用随机天气时出现；其他标签在没有数据或关闭对应传感器时省略。普通消息链使用临时 `extra_user_content_parts`。ChatMemory takeover contexts 已逐条携带 `<cm_time>`，所以它实际接管本轮请求时不会重复注入 `<LAST_CHAT>`；本地时间记录仍继续维护。
+**预生成的局限**：未来几天的日程是在那些天还没发生时提前生成的，模型参考不到“当天实际发生了什么”（用户临时约的事、临时加班等都可能晚于预生成时刻）。若想让未来日程吸收今天真实发生的情况，只能手动 `/schedule regenerate [天数|all]` 重做（串行逐日，后一天参考前一天的收尾状态）；`all` 等于当前注入窗口的天数。
+
+`<SCHEDULE_STATE>` 在日程未启用或未命中时为“无固定安排（按人设自然演绎）”；`<SCHEDULE_DONE>` / `<SCHEDULE_PLAN>` 按“已发生 / 未发生”切分同一份时间线——前者是冻结点之前已经过去的段（一行 `HH:MM-HH:MM 名称 | …`），后者是从此刻铺到 `ai_daily.plan_horizon_hours` 的行程，按天分段（`今天 10-20 周二`）且自带“还没发生、届时以实际情况为准”的说明句，没有时段的日子写「（未规划）」；两者都没有内容时整块省略；`<WEATHER>` 仅在启用随机天气时出现；其他标签在没有数据或关闭对应传感器时省略。普通消息链使用临时 `extra_user_content_parts`。ChatMemory takeover contexts 已逐条携带 `<cm_time>`，所以它实际接管本轮请求时不会重复注入 `<LAST_CHAT>`；本地时间记录仍继续维护。
 
 ## 命令
 
 | 命令 | 权限 | 作用 |
 |---|---|---|
-| `/calendar show [YYYY-MM]` | 所有人 | 查看月份事项 |
+| `/calendar show [YYYY-MM \| all]` | 所有人 | 查看某月事项；`all` 列出全部自定义事项（跨年份）与当年内置事件 |
 | `/calendar add <日期> [重复] <标题>` | 管理员 | 添加事项 |
 | `/calendar del <id>` | 管理员 | 删除自定义事项 |
 | `/calendar create` / `export` / `import [replace]` | 管理员 | 按世界观重新生成并替换自定义日历、导出、导入（默认合并，加 `replace` 先清空再导入）；内置事件不受影响 |

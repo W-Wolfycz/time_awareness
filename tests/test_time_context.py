@@ -55,3 +55,19 @@ def test_dynamic_tags_cannot_be_closed_by_content():
     assert "\x07" not in text and "\u200b" not in text
     # C1 / Unicode 行分隔符既非可见字符也不是合法标记，按空格归一
     assert "\x85" not in text and "\u2028" not in text
+
+
+def test_schedule_blocks_are_split_into_done_and_plan():
+    # 计划必须自带"这不是事实"的说明句：否则模型会把想象中的行程当成已发生的事断言出去
+    text = _service().build_dynamic(
+        now=NOW,
+        include_last_chat=False,
+        schedule_done="07:00-08:00 早饭",
+        schedule_plan="今天 10-20 周二\n  14:00-16:00 开会",
+    )
+    assert "<SCHEDULE_DONE>07:00-08:00 早饭</SCHEDULE_DONE>" in text
+    # 计划块必须自带"不是事实"的说明句，否则模型会把想象中的行程当已发生的事断言出去
+    assert "<SCHEDULE_PLAN>" in text and "还没发生" in text
+    # 没有内容就不出现对应标签（空块只浪费 token）
+    plain = _service().build_dynamic(now=NOW, include_last_chat=False)
+    assert "<SCHEDULE_PLAN>" not in plain

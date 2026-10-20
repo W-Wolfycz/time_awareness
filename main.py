@@ -305,16 +305,32 @@ class TimeAwarenessPlugin(Star):
                             weather_text = self.weather_sensor.render_current(current)
                     except Exception as e:
                         logger.debug(f"{tag(event)} 天气实况查询失败: {e}")
-                schedule_summary = None
+                schedule_done = None
+                schedule_plan = None
+                # 同一轮取一次 now：done/plan 各自取时间会在整分钟跨界时漏掉同一段
+                schedule_now = self.time_context.now()
                 try:
-                    schedule_summary = self.daily_schedule_service.today_schedule_summary(umo)
+                    schedule_done = self.daily_schedule_service.done_summary(
+                        umo, now=schedule_now
+                    )
                 except Exception as e:
-                    logger.debug(f"{tag(event)} 今日安排摘要获取失败: {e}")
+                    logger.warning(
+                        f"{tag(event)} ⚠️ 今日已过日程摘要构建失败: {type(e).__name__}"
+                    )
+                try:
+                    schedule_plan = self.daily_schedule_service.plan_summary(
+                        umo, now=schedule_now
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"{tag(event)} ⚠️ 日程计划构建失败: {type(e).__name__}"
+                    )
                 dyn = self.time_context.build_dynamic(
                     session=umo,
                     include_last_chat=not is_chat_memory_takeover_applied(event),
                     weather_text=weather_text,
-                    schedule_summary=schedule_summary,
+                    schedule_done=schedule_done,
+                    schedule_plan=schedule_plan,
                 )
                 req.extra_user_content_parts.append(TextPart(text=dyn).mark_as_temp())
             except Exception as e:
@@ -462,9 +478,10 @@ class TimeAwarenessPlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @schedule_group.command("regenerate")
-    async def schedule_regenerate(self, event: AstrMessageEvent):
+    async def schedule_regenerate(self, event: AstrMessageEvent, target: str = ""):
         async for text in self.schedule_commands.regenerate(
             event.unified_msg_origin or "",
             event=event,
+            target=target,
         ):
             yield event.plain_result(text)

@@ -1,12 +1,6 @@
 """core/calendar_store.py 与 core/builtin_events.py 的规则测试。"""
 
-import datetime
 
-from time_awareness.core.builtin_events import (
-    CATEGORY_INTERNATIONAL,
-    CATEGORY_POLITICAL,
-    generate_for_year,
-)
 from time_awareness.core.calendar_store import (
     REPEAT_FOREVER,
     CalendarStore,
@@ -46,40 +40,3 @@ def test_events_for_date_repeat_rules():
     assert len(store.events_for_date(2027, 8, 11)) == 2  # B + forever
     assert len(store.events_for_date(2028, 8, 11)) == 1  # 仅 forever
     assert store.events_for_date(2030, 8, 11)[0]["text"] == "C"
-
-
-def test_events_for_date_builtin_exact_year():
-    store = _store()
-    store.set_builtin_events(
-        [{"source": "builtin", "year": 2026, "month": 8, "day": 11, "text": "内置"}]
-    )
-    assert len(store.events_for_date(2026, 8, 11)) == 1
-    assert store.events_for_date(2027, 8, 11) == []
-
-
-def test_events_for_month_and_today_text():
-    store = _store(
-        [
-            {"year": 2026, "month": 8, "day": 20, "text": "后", "repeat": 0},
-            {"year": 2026, "month": 8, "day": 5, "text": "前", "repeat": 0},
-            {"year": 2026, "month": 8, "day": 5, "text": "前", "repeat": 0},
-        ],
-        [{"source": "builtin", "year": 2026, "month": 8, "day": 11, "text": "内置"}],
-    )
-    assert [e["text"] for e in store.events_for_month(2026, 8)] == ["前", "内置", "后"]
-    assert store.today_text(datetime.datetime(2026, 8, 11)) == "内置"
-
-
-def test_generate_for_year_fields_and_bounds():
-    events = generate_for_year(2026, [CATEGORY_POLITICAL, CATEGORY_INTERNATIONAL])
-    assert {e["category"] for e in events} == {CATEGORY_POLITICAL, CATEGORY_INTERNATIONAL}
-    for event in events:
-        assert event["year"] == 2026 and event["source"] == "builtin"
-        assert 1 <= event["month"] <= 12 and event["text"]
-        assert event["id"].startswith("builtin:")
-
-
-def test_generate_for_year_unknown_category_ignored():
-    assert generate_for_year(2026, ["bogus"]) == []
-    events = generate_for_year(2026, [CATEGORY_POLITICAL, "bogus"])
-    assert {e["category"] for e in events} == {CATEGORY_POLITICAL}

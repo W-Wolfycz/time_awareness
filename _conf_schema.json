@@ -355,6 +355,15 @@
             },
             "hint": "开启后只有发送者角色为管理员的会话能触发改写；其他会话调用会被拒绝（工具仍在，避免模型凭空声称已改）"
           },
+          "plan_horizon_hours": {
+            "description": "🗓️ 计划注入窗口（小时）",
+            "type": "int",
+            "default": 24,
+            "condition": {
+              "enabled": true
+            },
+            "hint": "对话里注入多远的日程计划（含今天剩余与之后几天，按天分段）；0=不注入计划。预生成天数按触发模式与窗口自动反推——保证任一时刻的未来注入窗口都有计划日程"
+          },
           "random_weather_enabled": {
             "description": "🎲 启用随机天气",
             "type": "bool",

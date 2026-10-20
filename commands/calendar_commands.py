@@ -49,7 +49,7 @@ class CalendarCommands:
     def help_text() -> str:
         return (
             "[time_awareness 命令]\n"
-            "/calendar show [YYYY-MM]  — 列出指定月份（默认本月）的事项\n"
+            "/calendar show [YYYY-MM | all]  — 列出指定月份（默认本月）或全部事项\n"
             "/calendar add <日期> [重复] <标题>  — 新增事项（管理员）\n"
             "/calendar del <id>  — 删除用户事项（管理员；内置事件不允许删除，请用配置开关）\n"
             "/calendar create  — 按世界观替换全部自定义事项，内置事件不变（管理员）\n"
@@ -81,6 +81,8 @@ class CalendarCommands:
         )
 
     def show(self, month: str = "") -> str:
+        if month.strip().lower() in {"all", "全部", "*"}:
+            return self._show_all()
         now = self._now()
         year, mon = now.year, now.month
         if month:
@@ -111,6 +113,51 @@ class CalendarCommands:
                     f"  #{event.get('id', '')[:8]} {mon:02d}-{day:02d} "
                     f"{text}{describe_repeat(event.get('repeat', 0))}"
                 )
+        return "\n".join(lines)
+
+    def _show_all(self) -> str:
+        """全部事项：自定义（跨年份，按时间排序）+ 当年内置（按启用分类）。"""
+        custom = [event for event in self.calendar_store.events if isinstance(event, dict)]
+        custom.sort(
+            key=lambda event: (
+                int(event.get("year") or 0),
+                int(event.get("month") or 0),
+                int(event.get("day") or 0),
+                str(event.get("text", "")),
+            )
+        )
+        enabled = bool(self._enabled_builtin_categories())
+        builtin = (
+            [event for event in self.calendar_store.builtin_events if isinstance(event, dict)]
+            if enabled
+            else []
+        )
+        builtin.sort(
+            key=lambda event: (int(event.get("month") or 0), int(event.get("day") or 0))
+        )
+        if not custom and not builtin:
+            return "当前没有任何事项（自定义与内置都为空）。"
+
+        year = self._now().year
+        lines = [f"[全部事项 · 自定义 {len(custom)} 条 · {year} 年内置 {len(builtin)} 条]"]
+        for event in custom:
+            lines.append(
+                f"  #{str(event.get('id', ''))[:8]} "
+                f"{int(event.get('year') or 0)}-{int(event.get('month') or 0):02d}-"
+                f"{int(event.get('day') or 0):02d} {event.get('text', '')}"
+                f"{describe_repeat(int(event.get('repeat') or 0))}"
+            )
+        if not custom:
+            lines.append("  自定义事项：无")
+        if builtin:
+            lines.append(f"{year} 年内置：")
+            for event in builtin:
+                lines.append(
+                    f"  {int(event.get('month') or 0):02d}-{int(event.get('day') or 0):02d} "
+                    f"{event.get('text', '')} [{category_short_tag(event.get('category', ''))}]"
+                )
+        elif not enabled:
+            lines.append("内置事项：未启用任何分类")
         return "\n".join(lines)
 
     def add(self, date_str: str, repeat_or_title: str, title: str) -> str:
@@ -217,7 +264,7 @@ class CalendarCommands:
             return
 
         now = self._now()
-        yield f"正在调用 AI 生成「{theme}」主题日历，请稍候……"
+        yield "正在调用 AI 生成日历，请稍候……"
         try:
             max_events = int(calendar_config.get("ai_generate_max_events", DEFAULT_MAX_GENERATE) or DEFAULT_MAX_GENERATE)
         except (TypeError, ValueError):
@@ -248,8 +295,8 @@ class CalendarCommands:
             yield "生成成功但写入文件失败，请检查日志。"
             return
         yield (
-            f"✅ 已重新生成 {count} 条自定义事项（主题：{theme}）。"
-            "原有自定义事项已替换；内置现实事件不受影响。使用 /calendar show 查看全部。"
+            f"✅ 已重新生成 {count} 条自定义事项。"
+            "原有自定义事项已替换；内置现实事件不受影响。使用 /calendar show all 查看全部。"
         )
 
     def export_yaml(self) -> str:

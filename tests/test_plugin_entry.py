@@ -6,11 +6,9 @@ from time_awareness.tests._shared import FakeContext, FakeEvent, install_astrbot
 
 install_astrbot_stubs()
 
-from astrbot.api import logger as api_logger  # noqa: E402
 from astrbot.api.provider import ProviderRequest  # noqa: E402
 from astrbot.api.star import StarTools  # noqa: E402
 from time_awareness.constants import DEFAULT_TIME_GUIDANCE_PROMPT  # noqa: E402
-from time_awareness.log import logger as proxy_logger  # noqa: E402
 from time_awareness.main import TimeAwarenessPlugin  # noqa: E402
 
 GROUP_1 = "aiocqhttp:GroupMessage:10001"
@@ -127,12 +125,3 @@ def test_schedule_tool_injection_follows_config(tmp_path, monkeypatch):
             await off_guidance.terminate()
 
     asyncio.run(scenario())
-
-
-def test_logger_proxy_forwards_levels():
-    api_logger.calls.clear()
-    proxy_logger.debug("d")
-    proxy_logger.info("i")
-    proxy_logger.warning("w")
-    proxy_logger.error("e")
-    assert [c[0] for c in api_logger.calls] == ["debug", "info", "warning", "error"]

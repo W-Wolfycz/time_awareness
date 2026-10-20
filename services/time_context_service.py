@@ -71,10 +71,13 @@ class TimeContextService:
         now=None,
         include_last_chat: bool = True,
         weather_text: str | None = None,
-        schedule_summary: str | None = None,
+        schedule_done: str | None = None,
+        schedule_plan: str | None = None,
     ) -> str:
-        """把同一 ``now`` 快照渲染成本轮动态 XML 标签；weather/schedule 为空则省略对应标签。
+        """把同一 ``now`` 快照渲染成本轮动态 XML 标签；无内容的块直接省略。
 
+        日程按"已发生 / 未发生"分成两块：``<SCHEDULE_DONE>`` 是今天已经过去的段（事实），
+        ``<SCHEDULE_PLAN>`` 是从此刻起未执行的段（计划，随时可被现实改写）。
         所有内容一律经 ``_tag`` 渲染：这些文本可能来自配置页直接编辑、历史数据或日历/日程写入，
         不能让内容闭合或伪造本插件自己的标记块。
         """
@@ -88,8 +91,18 @@ class TimeContextService:
         if self.time_guidance_enabled():
             parts.append(self.build_datetime_reminder(now=facts.now))
         parts.append(self._tag("SCHEDULE_STATE", facts.schedule.state))
-        if schedule_summary:
-            parts.append(self._tag("TODAY_SCHEDULE", schedule_summary))
+        if schedule_done:
+            parts.append(self._tag("SCHEDULE_DONE", schedule_done))
+        if schedule_plan:
+            parts.append(
+                self._tag(
+                    "SCHEDULE_PLAN",
+                    schedule_plan,
+                    prefix=(
+                        "你排的行程（还没发生）；真到那个时候以实际情况为准，可以随时改主意：\n"
+                    ),
+                )
+            )
         if weather_text:
             parts.append(self._tag("WEATHER", weather_text, prefix="今日天气基调："))
         if facts.workday.available:

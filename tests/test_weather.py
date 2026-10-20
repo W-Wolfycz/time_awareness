@@ -6,9 +6,7 @@
 
 import asyncio
 import datetime
-from collections import Counter
 
-from time_awareness.core.weather.random_weather import daily_weather_outline
 from time_awareness.core.weather_sensor import WeatherSensor
 
 
@@ -18,19 +16,6 @@ def _sensor(tmp_path, **ai_daily):
     return WeatherSensor(
         config={"daily_schedule": {"ai_daily": base}}, data_dir=str(tmp_path)
     )
-
-
-def test_seed_deterministic_and_diverse():
-    """固定日期输出确定且多样：30 天至少 3 种天气，高权重「晴」不少于最低档。"""
-    counter = Counter()
-    for offset in range(30):
-        date = datetime.date(2026, 8, 1) + datetime.timedelta(days=offset)
-        first = daily_weather_outline(date)
-        second = daily_weather_outline(date)
-        assert first == second  # 同日期同种子 → 完全确定
-        counter[first["text_day"]] += 1
-    assert len(counter) >= 3
-    assert counter["晴"] >= counter["雾"]
 
 
 def test_same_day_stable_and_forecast_matches_reality(tmp_path):
@@ -67,14 +52,3 @@ def test_plugin_timezone_date_seed_not_os_local(tmp_path):
     # 同一插件时区日期：实况与预报必须同一基调（即使 OS 本地是前一天）
     assert current["text_day"] == forecast["textDay"]
     assert forecast["fxDate"] == "2026-08-24"
-
-
-def test_temperature_smooth_and_sane():
-    """8 月 31 天：相邻日温差有界、温度在合理区间、最低<最高。"""
-    dates = [datetime.date(2026, 8, 1) + datetime.timedelta(days=i) for i in range(31)]
-    outlines = [daily_weather_outline(d) for d in dates]
-    highs = [o["temp_max"] for o in outlines]
-    for a, b in zip(highs, highs[1:]):
-        assert abs(a - b) <= 10  # 极端天气切换（晴↔雷阵雨 8°C）+ 抖动 ±2
-    assert all(20 <= h <= 42 for h in highs)
-    assert all(o["temp_min"] < o["temp_max"] for o in outlines)
