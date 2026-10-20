@@ -12,8 +12,9 @@ from ..constants import (
     DEFAULT_DAILY_SCHEDULE_SYSTEM_PROMPT,
 )
 from ..domain.schedule import (
-    _CONTROL_CHARS,
+    UNSAFE_TEXT_REASON,
     ScheduleValidationError,
+    has_unsafe_text,
     normalize_daily_slots,
     parse_time,
     schedule_similarity,
@@ -66,8 +67,8 @@ def _clean_text(value: str, *, field: str, max_length: int) -> str:
         raise ScheduleValidationError(f"{field} 不能为空")
     if len(text) > max_length:
         raise ScheduleValidationError(f"{field} 超出长度上限")
-    if _CONTROL_CHARS.search(text) or "<" in text or ">" in text:
-        raise ScheduleValidationError(f"{field} 含控制字符或 XML 标签")
+    if has_unsafe_text(text):
+        raise ScheduleValidationError(f"{field} {UNSAFE_TEXT_REASON}")
     return text
 
 

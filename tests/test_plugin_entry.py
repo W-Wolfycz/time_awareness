@@ -60,6 +60,75 @@ def test_plugin_entry_lifecycle(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_schedule_tool_injection_follows_config(tmp_path, monkeypatch):
+    """工具注入接线：关闭（或日程不可用）时不注入，开启后注入带 handler 的工具。"""
+    monkeypatch.setattr(
+        StarTools, "get_data_dir", staticmethod(lambda name: str(tmp_path))
+    )
+
+    async def scenario():
+        off = TimeAwarenessPlugin(FakeContext(), _config())
+        await off.initialize()
+        try:
+            req = ProviderRequest(system_prompt="", extra_user_content_parts=[])
+            await off.inject_time_context(
+                FakeEvent(unified_msg_origin=GROUP_1, message_str="你好"), req
+            )
+            assert req.func_tool is None or req.func_tool.get_tool("daily_schedule") is None
+        finally:
+            await off.terminate()
+
+        config = {
+            "daily_schedule": {
+                "enable_schedule": True,
+                "ai_daily": {"enabled": True, "allow_ai_edit": True},
+            },
+            "time_awareness": {"time_guidance_enabled": True, "time_sensors": []},
+            "calendar": {"enable_builtin_events": False},
+        }
+        on = TimeAwarenessPlugin(FakeContext(), config)
+        await on.initialize()
+        try:
+            assert on.daily_schedule_service.enabled() is True
+            req = ProviderRequest(system_prompt="", extra_user_content_parts=[])
+            await on.inject_time_context(
+                FakeEvent(unified_msg_origin=GROUP_1, message_str="你好"), req
+            )
+            tool = req.func_tool.get_tool("daily_schedule") if req.func_tool else None
+            assert tool is not None and callable(tool.handler)
+
+            # handler 透传：工具参数真的到达服务层（不是被吞掉或错位）
+            event = FakeEvent(unified_msg_origin=GROUP_1, message_str="你好")
+            assert "action 非法" in await on._handle_schedule_tool(event, action="bogus")
+            assert "过去的日期" in await on._handle_schedule_tool(
+                event, action="add", date="昨天", name="x", start="19:00", end="20:00", state="y"
+            )
+        finally:
+            await on.terminate()
+
+        # 时笺总开关关闭时不注入：模型看不到时间与日程上下文，不该改日程
+        muted = {
+            "daily_schedule": {
+                "enable_schedule": True,
+                "ai_daily": {"enabled": True, "allow_ai_edit": True},
+            },
+            "time_awareness": {"time_guidance_enabled": False, "time_sensors": []},
+            "calendar": {"enable_builtin_events": False},
+        }
+        off_guidance = TimeAwarenessPlugin(FakeContext(), muted)
+        await off_guidance.initialize()
+        try:
+            req = ProviderRequest(system_prompt="", extra_user_content_parts=[])
+            await off_guidance.inject_time_context(
+                FakeEvent(unified_msg_origin=GROUP_1, message_str="你好"), req
+            )
+            assert req.func_tool is None or req.func_tool.get_tool("daily_schedule") is None
+        finally:
+            await off_guidance.terminate()
+
+    asyncio.run(scenario())
+
+
 def test_logger_proxy_forwards_levels():
     api_logger.calls.clear()
     proxy_logger.debug("d")

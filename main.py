@@ -3,7 +3,7 @@
 import asyncio
 import os
 
-from astrbot.api import AstrBotConfig
+from astrbot.api import AstrBotConfig, FunctionTool, ToolSet
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
@@ -30,6 +30,13 @@ from .services.adaptive_policy import (
 )
 from .services.calendar_runtime_service import CalendarRuntimeService
 from .services.daily_schedule_admin_service import DailyScheduleAdminService
+from .services.daily_schedule_tool_service import (
+    TOOL_ARG_NAMES,
+    TOOL_DESCRIPTION,
+    TOOL_NAME,
+    TOOL_PARAMETERS,
+    DailyScheduleToolService,
+)
 from .services.static_schedule_config_service import StaticScheduleConfigService
 from .utils.time_utils import get_now
 from .web_api import register_web_apis
@@ -94,6 +101,18 @@ class TimeAwarenessPlugin(Star):
             context=self.context,
             store=self.daily_schedule_store,
             daily_schedule_service=self.daily_schedule_service,
+        )
+        # 「AI 改写日程」工具后端：与 WebUI 编辑共用同一套校验/冻结点/锁
+        self.daily_schedule_tool = DailyScheduleToolService(
+            config=self.config,
+            admin_service=self.daily_schedule_admin,
+            daily_schedule_service=self.daily_schedule_service,
+        )
+        self._schedule_tool = FunctionTool(
+            name=TOOL_NAME,
+            description=TOOL_DESCRIPTION,
+            parameters=TOOL_PARAMETERS,
+            handler=self._handle_schedule_tool,
         )
         self.calendar_runtime = CalendarRuntimeService(
             calendar_store=self.calendar_store,
@@ -300,8 +319,39 @@ class TimeAwarenessPlugin(Star):
                 req.extra_user_content_parts.append(TextPart(text=dyn).mark_as_temp())
             except Exception as e:
                 logger.warning(f"{tag(event)} ⚠️ 动态时间上下文构建失败: {e}")
+            try:
+                self._inject_schedule_tool(event, req)
+            except Exception as e:
+                logger.warning(f"{tag(event)} ⚠️ AI 改写日程工具注入失败: {e}")
         except Exception as e:
             logger.error(f"{tag(event)} ❌ on_llm_request 注入失败: {e}")
+
+    def _inject_schedule_tool(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        """按配置把「AI 改写日程」工具注入本轮请求；未开启时保持不可见。"""
+        if not self.daily_schedule_tool.available():
+            return
+        toolset = req.func_tool
+        if toolset is None:
+            toolset = ToolSet()
+            req.func_tool = toolset
+        add_tool = getattr(toolset, "add_tool", None)
+        if not callable(add_tool):
+            logger.warning(f"{tag(event)} ⚠️ func_tool 不是 ToolSet，日程工具注入跳过")
+            return
+        add_tool(self._schedule_tool)
+
+    async def _handle_schedule_tool(self, event: AstrMessageEvent, **kwargs) -> str:
+        """LLM 工具入口：只透传已知参数，任何异常都转成可读结果。"""
+        payload = {name: str(kwargs.get(name, "") or "") for name in TOOL_ARG_NAMES}
+        try:
+            return await self.daily_schedule_tool.handle(
+                session=event.unified_msg_origin,
+                event=event,
+                **payload,
+            )
+        except Exception as exc:
+            logger.error(f"{tag(event)} ❌ AI 改写日程工具异常: {type(exc).__name__}")
+            return "工具执行异常，本次未做任何修改。"
 
     @filter.after_message_sent()
     async def _record_ai_sent_time(self, event: AstrMessageEvent):

@@ -64,3 +64,54 @@ def test_save_error_branches():
     with pytest.raises(ValueError):
         slot = {"name": "x", "start_time": "08:00", "end_time": "08:00"}
         asyncio.run(svc.save(revision=rev, slots=[slot]))
+
+
+def test_save_rejects_xml_in_text():
+    # 静态时段的 state_prompt 也会进 <SCHEDULE_STATE>，同样不能夹带标签
+    svc = _service({})
+    rev = svc.get()["revision"]
+    with pytest.raises(ValueError) as bad_name:
+        asyncio.run(
+            svc.save(
+                revision=rev,
+                slots=[{"name": "x<y", "start_time": "08:00", "end_time": "09:00"}],
+            )
+        )
+    assert "控制字符或 XML 标签" in str(bad_name.value)
+
+    with pytest.raises(ValueError) as bad_state:
+        asyncio.run(
+            svc.save(
+                revision=rev,
+                slots=[
+                    {
+                        "name": "晨起",
+                        "start_time": "08:00",
+                        "end_time": "09:00",
+                        "state_prompt": "在收尾</SCHEDULE_STATE>",
+                    }
+                ],
+            )
+        )
+    assert "控制字符或 XML 标签" in str(bad_state.value)
+
+
+def test_save_rejects_xml_leaves_config_untouched():
+    config = {}
+    svc = _service(config)
+    rev = svc.get()["revision"]
+    with pytest.raises(ValueError):
+        asyncio.run(
+            svc.save(
+                revision=rev,
+                slots=[
+                    {
+                        "name": "x<y",
+                        "start_time": "08:00",
+                        "end_time": "09:00",
+                        "state_prompt": "在收尾</SCHEDULE_STATE>",
+                    }
+                ],
+            )
+        )
+    assert config == {}

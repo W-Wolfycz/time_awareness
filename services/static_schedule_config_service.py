@@ -9,9 +9,11 @@ from collections.abc import Callable
 from typing import Any
 
 from ..domain.schedule import (
+    UNSAFE_TEXT_REASON,
     ScheduleValidationError,
     detect_static_overlaps,
     format_time,
+    has_unsafe_text,
     parse_time,
 )
 from ..domain.schedule_edit import MAX_NAME_LENGTH, MAX_STATE_LENGTH
@@ -148,6 +150,16 @@ class StaticScheduleConfigService:
                 raise ValueError(f"第 {index} 个时段名称超过 {MAX_NAME_LENGTH} 字")
             if len(state) > MAX_STATE_LENGTH:
                 raise ValueError(f"第 {index} 个状态描述超过 {MAX_STATE_LENGTH} 字")
+            # 静态时段也会进 <SCHEDULE_STATE>，与人格日程同一道文本门
+            unsafe_fields = [
+                field
+                for field, field_value in (("时段名称", name), ("状态描述", state))
+                if has_unsafe_text(field_value)
+            ]
+            if unsafe_fields:
+                raise ValueError(
+                    f"第 {index} 个{'；'.join(unsafe_fields)}{UNSAFE_TEXT_REASON}"
+                )
             try:
                 start = parse_time(
                     str(raw.get("start_time", "") or ""),

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from ..domain.schedule import neutralize_markup
+from ..log import logger, tag
 from .time_facts_service import SensorFact, TimeFactsCollector
 
 
@@ -71,7 +73,11 @@ class TimeContextService:
         weather_text: str | None = None,
         schedule_summary: str | None = None,
     ) -> str:
-        """把同一 ``now`` 快照渲染成本轮动态 XML 标签；weather/schedule 为空则省略对应标签。"""
+        """把同一 ``now`` 快照渲染成本轮动态 XML 标签；weather/schedule 为空则省略对应标签。
+
+        所有内容一律经 ``_tag`` 渲染：这些文本可能来自配置页直接编辑、历史数据或日历/日程写入，
+        不能让内容闭合或伪造本插件自己的标记块。
+        """
         facts = self.facts.collect(
             scope="conversation",
             session=session,
@@ -81,24 +87,33 @@ class TimeContextService:
         parts = []
         if self.time_guidance_enabled():
             parts.append(self.build_datetime_reminder(now=facts.now))
-        parts.append(f"<SCHEDULE_STATE>{facts.schedule.state}</SCHEDULE_STATE>")
+        parts.append(self._tag("SCHEDULE_STATE", facts.schedule.state))
         if schedule_summary:
-            parts.append(f"<TODAY_SCHEDULE>{schedule_summary}</TODAY_SCHEDULE>")
+            parts.append(self._tag("TODAY_SCHEDULE", schedule_summary))
         if weather_text:
-            parts.append(f"<WEATHER>今日天气基调：{weather_text}</WEATHER>")
+            parts.append(self._tag("WEATHER", weather_text, prefix="今日天气基调："))
         if facts.workday.available:
-            parts.append(f"<WORKDAY_STATE>{facts.workday.value}</WORKDAY_STATE>")
+            parts.append(self._tag("WORKDAY_STATE", facts.workday.value))
         if facts.lunar.available:
-            parts.append(f"<LUNAR_STATE>{facts.lunar.value}</LUNAR_STATE>")
+            parts.append(self._tag("LUNAR_STATE", facts.lunar.value))
         if facts.almanac.available:
-            parts.append(f"<ALMANAC_STATE>{facts.almanac.value}</ALMANAC_STATE>")
+            parts.append(self._tag("ALMANAC_STATE", facts.almanac.value))
         if facts.today_events.available and facts.today_events.value:
-            parts.append(f"<TODAY_EVENTS>{facts.today_events.value}</TODAY_EVENTS>")
+            parts.append(self._tag("TODAY_EVENTS", facts.today_events.value))
         if facts.upcoming.available and facts.upcoming.value:
-            parts.append(f"<UPCOMING_DAYS>{facts.upcoming.value}</UPCOMING_DAYS>")
+            parts.append(self._tag("UPCOMING_DAYS", facts.upcoming.value))
         if facts.last_chat.available:
-            parts.append(f"<LAST_CHAT>{facts.last_chat.value}</LAST_CHAT>")
+            parts.append(self._tag("LAST_CHAT", facts.last_chat.value))
         return "\n".join(parts)
+
+    @staticmethod
+    def _tag(name: str, value, *, prefix: str = "") -> str:
+        """渲染单个标记块：中和会破坏标记的内容，并在真的改写时留一条 DEBUG 便于排查。"""
+        text = str(value or "")
+        safe = neutralize_markup(text)
+        if safe != text:
+            logger.debug(f"{tag()} 注入内容含控制字符或尖括号，已在 <{name}> 前中和")
+        return f"<{name}>{prefix}{safe}</{name}>"
 
     def build_datetime_reminder(self, *, now=None) -> str:
         """构造插件自有的中文大写现实时间标签。"""

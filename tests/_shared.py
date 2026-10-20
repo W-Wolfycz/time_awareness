@@ -57,8 +57,36 @@ def install_astrbot_stubs():
             def __init__(self, system_prompt="", extra_user_content_parts=None):
                 self.system_prompt = system_prompt
                 self.extra_user_content_parts = list(extra_user_content_parts or [])
+                self.func_tool = None
 
         _api().provider = _module("astrbot.api.provider", ProviderRequest=ProviderRequest)
+
+    if not hasattr(_api(), "ToolSet"):
+        class FunctionTool:
+            """工具容器桩：只保留注册/查找需要的字段。"""
+
+            def __init__(self, *, name, description, parameters, handler=None, **kwargs):
+                self.name = name
+                self.description = description
+                self.parameters = parameters
+                self.handler = handler
+
+        class ToolSet:
+            def __init__(self, tools=None):
+                self.tools = list(tools or [])
+
+            def add_tool(self, tool):
+                self.tools = [item for item in self.tools if item.name != tool.name]
+                self.tools.append(tool)
+
+            def get_tool(self, name):
+                return next((item for item in self.tools if item.name == name), None)
+
+            def remove_tool(self, name):
+                self.tools = [item for item in self.tools if item.name != name]
+
+        _api().FunctionTool = FunctionTool
+        _api().ToolSet = ToolSet
 
     if "astrbot.api.star" not in sys.modules:
         class Star:

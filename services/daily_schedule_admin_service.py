@@ -8,7 +8,13 @@ import uuid
 from typing import Any
 
 from ..core.daily_schedule_store import DailyScheduleSnapshotStore
-from ..domain.schedule import parse_time, format_time, ScheduleValidationError
+from ..domain.schedule import (
+    UNSAFE_TEXT_REASON,
+    ScheduleValidationError,
+    format_time,
+    has_unsafe_text,
+    parse_time,
+)
 from ..domain.timeline import (
     advance_executed,
     merge_active_slot_fragments,
@@ -16,6 +22,7 @@ from ..domain.timeline import (
     render_effective_timeline,
 )
 from ..domain.schedule_edit import (
+    EDIT_START_GRACE_MINUTES,
     MAX_NAME_LENGTH,
     MAX_SLOTS_PER_SNAPSHOT,
     MAX_STATE_LENGTH,
@@ -27,6 +34,16 @@ from ..domain.schedule_edit import (
 from ..log import logger, tag
 from ..utils.time_utils import to_timezone_key
 from .daily_schedule_service import DailyScheduleService
+
+
+def _clamp_late_start(start: int, cutoff: int) -> int | None:
+    """宽限窗内的迟到起点 → 冻结点；窗外返回 None（调用方按"不能早于冻结点"拒绝）。
+
+    只前移、绝不写过去：请求在路上时冻结点前移，起点被越过一小段属于时延，不该让模型重试。
+    """
+    if cutoff - EDIT_START_GRACE_MINUTES <= start < cutoff:
+        return cutoff
+    return None
 
 
 class ScheduleSaveConflict(Exception):
@@ -194,6 +211,32 @@ class DailyScheduleAdminService:
             "slots": detailed_slots,
         }
 
+    def get_editable_state(
+        self,
+        persona_hash: str,
+        local_date: datetime.date,
+        timezone: str,
+        *,
+        now: datetime.datetime | None = None,
+    ) -> dict | None:
+        """读取改写所需的原始用户层与冻结点（不渲染）；快照不可用返回 None。"""
+        self.store.load_readonly()
+        snapshot = self.store.get(persona_hash, local_date, timezone)
+        if snapshot is None or snapshot.get("status") != "ready":
+            return None
+        now = now or self.daily_schedule_service.time_context.now()
+        now = to_timezone_key(now, str(snapshot.get("timezone", timezone) or timezone))
+        _, cutoff_minute = self._edit_window(local_date, now)
+        return {
+            "snapshot_id": str(snapshot.get("snapshot_id", "")),
+            "user_slots": [
+                dict(slot)
+                for slot in (snapshot.get("user_slots") or [])
+                if isinstance(slot, dict)
+            ],
+            "cutoff": cutoff_minute,
+        }
+
     def _current_static(self) -> list[dict]:
         return self.daily_schedule_service._current_static_slots()
 
@@ -346,6 +389,17 @@ class DailyScheduleAdminService:
             state = str(item.get("state", "") or "").strip()
             if not name: errors.append(f"{label}：名称不能为空")
             if not state: errors.append(f"{label}：状态描述不能为空")
+            # WebUI 与 AI 工具共用这道门：文本会进 <SCHEDULE_STATE>，不能让内容闭合标记块
+            unsafe_fields = [
+                field
+                for field, field_value in (("名称", name), ("状态描述", state))
+                if has_unsafe_text(field_value)
+            ]
+            if unsafe_fields:
+                errors.extend(
+                    f"{label}：{field}{UNSAFE_TEXT_REASON}" for field in unsafe_fields
+                )
+                continue
             try:
                 start = parse_time(str(item.get("start", "")), strict=True)
                 end = parse_time(str(item.get("end", "")), allow_24=True, strict=True)
@@ -369,11 +423,19 @@ class DailyScheduleAdminService:
                 is_new = False
 
             if is_new:
-                # 新增用户时段：不得借用拆分逻辑创建过去时段
+                # 新增用户时段：不得借用拆分逻辑创建过去时段；仅宽限窗内的迟到请求前移到冻结点
+                clamped = _clamp_late_start(start, cutoff)
+                if clamped is not None:
+                    start = clamped
                 if start < cutoff:
                     errors.append(
                         f"{label}：开始时间不能早于冻结点 {format_time(cutoff)}"
                         "（页面停留期间冻结点可能已前移，请刷新后重试）"
+                    )
+                    continue
+                if end <= start:
+                    errors.append(
+                        f"{label}：该时段已被冻结点 {format_time(cutoff)} 越过，没有可写的区间"
                     )
                     continue
                 result.append({
@@ -400,11 +462,19 @@ class DailyScheduleAdminService:
                 )
                 continue
             if orig_start > cutoff:
-                # 完全未来：全部字段可改，但开始时间不得移入冻结区
+                # 完全未来：全部字段可改，但开始时间不得移入冻结区（宽限窗内的迟到起点前移到冻结点）
+                clamped = _clamp_late_start(start, cutoff)
+                if clamped is not None:
+                    start = clamped
                 if start < cutoff:
                     errors.append(
                         f"{label}：开始时间不能早于冻结点 {format_time(cutoff)}"
                         "（页面停留期间冻结点可能已前移，请刷新后重试）"
+                    )
+                    continue
+                if end <= start:
+                    errors.append(
+                        f"{label}：该时段已被冻结点 {format_time(cutoff)} 越过，没有可写的区间"
                     )
                     continue
                 result.append({
@@ -414,6 +484,24 @@ class DailyScheduleAdminService:
                     "state": state[:MAX_STATE_LENGTH],
                     "origin": "user",
                     "user_slot_id": slot_id or uuid.uuid4().hex,
+                })
+                continue
+            # 刚被冻结点越过（原 start 仍在宽限窗内）：视为迟到请求，整段可改、起点前移到冻结点。
+            # 历史部分已固化在 executed_slots 里，改名不会改写已发生的段落。
+            if orig_start >= cutoff - EDIT_START_GRACE_MINUTES:
+                if end <= cutoff:
+                    errors.append(
+                        f"{label}：结束时间必须晚于冻结点 {format_time(cutoff)}"
+                        "（页面停留期间冻结点可能已前移，请刷新后重试）"
+                    )
+                    continue
+                result.append({
+                    "name": name[:MAX_NAME_LENGTH],
+                    "start": format_time(cutoff),
+                    "end": format_time(end),
+                    "state": state[:MAX_STATE_LENGTH],
+                    "origin": "user",
+                    "user_slot_id": slot_id,
                 })
                 continue
             # 跨冻结点：尾段仅允许修改结束时间；start 只接受原 start 或渲染裁剪值。

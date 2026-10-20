@@ -12,10 +12,37 @@ MINUTES_PER_DAY = 24 * 60
 _STRICT_TIME_RE = re.compile(r"^(\d{2}):(\d{2})$")
 _LENIENT_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# 只丢「没有正常排印用途」的不可见字符：ZWSP、BOM/ZWNBSP、双向嵌入/覆盖与隔离控制、Unicode 标签字符。
+# ZWJ/ZWNJ 与 LRM/RLM 有正常用途（emoji 组合、波斯/印度语、双向排版），保留以免破坏正文。
+_INVISIBLE_CHARS = re.compile(
+    r"[\u200b\u202a-\u202e\u2060\u2066-\u2069\ufeff\U000e0000-\U000e007f]"
+)
+# C1 与 Unicode 行/段分隔符：罕见换行，注入边界按空格处理
+_LINE_SEPARATORS = re.compile(r"[\x85\u2028\u2029]")
 
 
 class ScheduleValidationError(ValueError):
     """日程结构或时间边界不符合协议。"""
+
+
+UNSAFE_TEXT_REASON = "含控制字符或 XML 标签（尖括号请改用全角 ＜＞）"
+
+
+def has_unsafe_text(value) -> bool:
+    """文本是否会被插件注入自己的 XML 标记块（如 <SCHEDULE_STATE>）——写入路径据此拒绝。"""
+    text = str(value or "")
+    return bool(_CONTROL_CHARS.search(text) or "<" in text or ">" in text)
+
+
+def neutralize_markup(value) -> str:
+    """注入边界兜底：丢弃控制字符与部分不可见字符、把尖括号换成全角，保证内容无法闭合或伪造标记块。
+
+    覆盖插件管不到的写入路径（AstrBot 主配置页直接编辑 schedule_templates、历史数据、手工改档）。
+    """
+    text = _CONTROL_CHARS.sub("", str(value or ""))
+    text = _INVISIBLE_CHARS.sub("", text)
+    text = _LINE_SEPARATORS.sub(" ", text)
+    return text.replace("<", "＜").replace(">", "＞")
 
 
 @dataclass(frozen=True)

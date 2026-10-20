@@ -336,6 +336,25 @@
             },
             "hint": "关=静态优先；开=AI 优先（用户层始终最高）"
           },
+          "allow_ai_edit": {
+            "description": "🛠️ 允许 AI 改写日程",
+            "type": "bool",
+            "default": false,
+            "condition": {
+              "enabled": true
+            },
+            "hint": "开启后模型可查看并改写角色日程：只能动标了「可改」的时段，已过去的不动。需同时开启「时笺」总开关，否则不注入"
+          },
+          "edit_requires_admin": {
+            "description": "🔒 仅管理员可让 AI 改写日程",
+            "type": "bool",
+            "default": false,
+            "condition": {
+              "enabled": true,
+              "allow_ai_edit": true
+            },
+            "hint": "开启后只有发送者角色为管理员的会话能触发改写；其他会话调用会被拒绝（工具仍在，避免模型凭空声称已改）"
+          },
           "random_weather_enabled": {
             "description": "🎲 启用随机天气",
             "type": "bool",
