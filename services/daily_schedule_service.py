@@ -54,6 +54,11 @@ from ..log import logger, tag
 # 生成锁的回收窗口（天）：锁键里带日期，过去的日期不会再生成，留 2 天只为覆盖时区边界
 STATE_RETENTION_DAYS = 2
 
+# 同一 Persona/日期两次生成尝试的最小间隔（分钟）：只做进程内限速，避免每条消息都打上游。
+# 不持久化、不跨天——目标日期没过就一定会被再试。
+GENERATION_RETRY_GAP_MINUTES = 30
+
+
 @dataclass(frozen=True)
 class ScheduleResolution:
     state_prompt: str
@@ -137,6 +142,8 @@ class DailyScheduleService:
         self._observed_horizon: int | None = None
         self._filling: bool = False
         self._tasks: dict[str, asyncio.Task] = {}
+        # 进程内尝试时间表（persona:date:tz → 上次尝试时刻）：只用于限速，不落盘
+        self._attempt_at: dict[str, datetime.datetime] = {}
 
     def set_available(self, available: bool) -> None:
         self._available = bool(available)
@@ -637,8 +644,15 @@ class DailyScheduleService:
         *,
         force: bool = False,
         target_date: datetime.date | None = None,
+        throttle: bool = True,
     ) -> bool:
-        """非阻塞提交生成；同一 persona/date 一个活动任务；日级熔断时自动生成被抑制，force 可绕过。"""
+        """非阻塞提交生成；同一 persona/date 一个活动任务。
+
+        快照不存在就生成：失败记录不参与判定（它只用于给用户报错）。
+        ``throttle=True``（消息触发路径）时同一 persona/date 间隔
+        ``GENERATION_RETRY_GAP_MINUTES`` 才再试一次，避免逐条消息打上游；
+        ``throttle=False``（定时扫描/启动补天）直接排队——未来几天本来就靠这几次扫描覆盖。
+        """
         if not self.enabled():
             logger.debug(f"{tag()} 跳过排队：AI 每日日程未启用")
             return False
@@ -652,6 +666,12 @@ class DailyScheduleService:
         self._representative_sessions[persona_hash] = session
         now = self.time_context.now()
         local_date = target_date or now.date()
+        if not force and local_date < now.date():
+            logger.debug(
+                f"{tag()} 跳过排队：目标日期已过去 "
+                f"date={local_date.isoformat()} today={now.date().isoformat()}"
+            )
+            return False
         target_now = self._context_now_for_date(now, local_date)
         timezone = self._timezone_key(target_now)
         snapshot = self.store.get(persona_hash, local_date, timezone)
@@ -661,14 +681,19 @@ class DailyScheduleService:
                 f"persona={self._identity_id_for(session)} date={local_date.isoformat()}"
             )
             return False
-        # 日级熔断：已有终态 failure 时抑制自动生成；先判快照可用再判 failure。
-        if not force and self.store.get_failure(persona_hash, local_date, timezone):
-            logger.debug(
-                f"{tag()} 跳过排队：本日已熔断（存在终态 failure） "
-                f"persona={self._identity_id_for(session)} date={local_date.isoformat()}"
-            )
-            return False
         task_key = self.store.snapshot_key(persona_hash, local_date, timezone)
+        if not force and throttle:
+            last_attempt = self._attempt_at.get(task_key)
+            if last_attempt is not None:
+                elapsed = (now - last_attempt).total_seconds()
+                if 0 <= elapsed < GENERATION_RETRY_GAP_MINUTES * 60:
+                    logger.debug(
+                        f"{tag()} 跳过排队：距上次尝试不足 {GENERATION_RETRY_GAP_MINUTES} 分钟 "
+                        f"persona={self._identity_id_for(session)} "
+                        f"date={local_date.isoformat()} "
+                        f"elapsed={int(elapsed)}s"
+                    )
+                    return False
         current = self._tasks.get(task_key)
         if current is not None and not current.done():
             logger.debug(
@@ -688,8 +713,13 @@ class DailyScheduleService:
         try:
             task = asyncio.create_task(self._generate_with_retries(frozen, force=force))
         except RuntimeError:
-            logger.debug(f"{tag()} 排队失败：事件循环不可用（RuntimeError）")
+            logger.warning(f"{tag()} ⚠️ 排队失败：事件循环不可用（RuntimeError）")
             return False
+        self._attempt_at[task_key] = now
+        if len(self._attempt_at) > 64:
+            cutoff = now - datetime.timedelta(days=1)
+            for stale_key in [k for k, v in self._attempt_at.items() if v < cutoff]:
+                self._attempt_at.pop(stale_key, None)
         self._tasks[task_key] = task
         logger.debug(
             f"{tag()} 已排队生成: persona={frozen.persona_id} "
@@ -726,7 +756,8 @@ class DailyScheduleService:
                 personas.setdefault(persona_hash, session)
         queued = 0
         for persona_hash, session in personas.items():
-            if self.queue_generation(session, target_date=target_date):
+            # 扫描是窗口覆盖的唯一来源：不受消息路径的限速约束
+            if self.queue_generation(session, target_date=target_date, throttle=False):
                 queued += 1
         logger.debug(
             f"{tag()} 每日生成扫描: 保活会话 {len(sessions)} → "
@@ -1179,12 +1210,26 @@ class DailyScheduleService:
             pass
         return 0, 5, 0
 
+    def _scan_target_dates(self, now: datetime.datetime) -> list[datetime.date]:
+        """本轮扫描要覆盖的日期：从触发目标日起，铺满预生成天数。
+
+        ``-HH:MM`` 的触发目标是次日（今天由昨天那轮负责），``HH:MM`` 是当天。
+        """
+        _, _, offset = self._parse_generation_time(
+            self._daily_config().get("generation_time", "00:05")
+        )
+        days = plan_days_ahead(self.plan_horizon_hours())
+        return [
+            now.date() + datetime.timedelta(days=offset + step)
+            for step in range(days)
+        ]
+
     async def run_daily_loop(self) -> None:
         """按配置时刻生成当天快照，或在 ``-HH:MM`` 时预生成次日快照。"""
-        try:
-            while True:
+        while True:
+            try:
                 now = self.time_context.now()
-                hour, minute, target_day_offset = self._parse_generation_time(
+                hour, minute, _ = self._parse_generation_time(
                     self._daily_config().get("generation_time", "00:05")
                 )
                 next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -1197,24 +1242,23 @@ class DailyScheduleService:
                     today=current.date(),
                 )
                 self._cleanup_stale_locks()
-                target_date = current.date() + datetime.timedelta(
-                    days=target_day_offset
-                )
+                targets = self._scan_target_dates(current)
                 queued = 0
-                horizon = self.plan_horizon_hours()
-                days = plan_days_ahead(horizon)
-                for step in range(days):
-                    day_target = target_date + datetime.timedelta(days=step)
+                for day_target in targets:
                     queued += await self.queue_known_profiles(target_date=day_target)
                     # 串行补天：次日的连续性要读前一天的收尾状态，必须等它落盘
                     await self._wait_pending_generations()
                 logger.debug(
                     f"{tag()} 🗓️ AI 每日日程定时扫描完成: "
-                    f"target_date={target_date.isoformat()} days={days} "
-                    f"horizon={horizon}h queued={queued}"
+                    f"targets={targets[0].isoformat()}..{targets[-1].isoformat()} "
+                    f"horizon={self.plan_horizon_hours()}h queued={queued}"
                 )
-        except asyncio.CancelledError:
-            logger.info(f"{tag()} AI 每日日程循环已取消")
+            except asyncio.CancelledError:
+                logger.info(f"{tag()} AI 每日日程循环已取消")
+                return
+            except Exception:
+                logger.exception(f"{tag()} AI 每日日程循环异常，下一轮继续")
+                await self._sleep(60.0)
 
     def watch_plan_horizon(self) -> None:
         """配置里的计划窗口变了就立刻补缺天（fire-and-forget），不必等下一次定时触发。
@@ -1238,12 +1282,9 @@ class DailyScheduleService:
         """把当前窗口内缺的快照补齐（串行，保证次日连续性）。"""
         self._filling = True
         try:
-            now = self.time_context.now()
-            offset, _ = self._generation_offset(now)
-            days = plan_days_ahead(self.plan_horizon_hours())
+            targets = self._scan_target_dates(self.time_context.now())
             queued = 0
-            for step in range(days):
-                target = now.date() + datetime.timedelta(days=offset + step)
+            for target in targets:
                 queued += await self.queue_known_profiles(target_date=target)
                 await self._wait_pending_generations()
             if queued:
@@ -1254,13 +1295,6 @@ class DailyScheduleService:
             return queued
         finally:
             self._filling = False
-
-    def _generation_offset(self, now: datetime.datetime) -> tuple[int, str]:
-        """解析 ``generation_time`` 的 (天数偏移, 规范化的 HH:MM)。"""
-        hour, minute, offset = self._parse_generation_time(
-            self._daily_config().get("generation_time", "00:05")
-        )
-        return offset, f"{hour:02d}:{minute:02d}"
 
     async def regenerate_for_date(
         self,
