@@ -1,10 +1,11 @@
 """AI 时间表生成器：按主题提示词调用 LLM 输出日历事项 JSON 数组。"""
 
+import asyncio
 from typing import Optional
 
-from ..log import logger, tag
-
 from ..constants import DEFAULT_AI_GENERATE_SYSTEM_PROMPT
+from ..log import logger, tag
+from .daily_schedule_generator import request_kwargs
 from .json_response import parse_json_response
 
 
@@ -87,6 +88,7 @@ async def generate_calendar_events(
     user_prompt: str,
     system_prompt: str,
     current_year: int,
+    max_attempts: int = 0,
 ) -> Optional[list]:
     """发起 LLM 调用，根据主题提示词生成时间表事项。"""
     user_prompt = (user_prompt or "").strip()
@@ -94,15 +96,29 @@ async def generate_calendar_events(
         logger.warning(f"{tag()} ⚠️ AI 生成时间表缺少主题提示词")
         return None
 
-    try:
-        llm_response = await context.llm_generate(
-            chat_provider_id=provider_id,
-            prompt=user_prompt,
-            system_prompt=system_prompt,
-        )
-    except Exception as e:
-        logger.error(f"{tag()} ❌ AI 生成时间表 LLM 调用失败: {e}")
-        return None
+    # 与其它 LLM 调用同一套重试语义：max_attempts 次，0 表示只打一次
+    attempts = max(1, max_attempts)
+    llm_response = None
+    for attempt in range(1, attempts + 1):
+        try:
+            llm_response = await context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                **request_kwargs(max_attempts),
+            )
+            break
+        except Exception as e:
+            if attempt >= attempts:
+                logger.error(
+                    f"{tag()} ❌ AI 生成时间表 LLM 调用失败（{attempt}/{attempts}）: "
+                    f"{type(e).__name__}"
+                )
+                return None
+            logger.warning(
+                f"{tag()} ⚠️ AI 生成时间表第 {attempt}/{attempts} 次失败，重试: {type(e).__name__}"
+            )
+            await asyncio.sleep(float(attempt))
 
     if not llm_response or llm_response.role != "assistant":
         logger.warning(

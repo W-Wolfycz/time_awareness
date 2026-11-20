@@ -18,12 +18,14 @@ from .core.builtin_manager import BuiltinManager
 from .core.calendar_manager import CalendarManager
 from .core.calendar_store import CalendarStore
 from .core.daily_schedule_store import DailyScheduleSnapshotStore
+from .core.persona_summary_store import PersonaSummaryStore
 from .core.last_chat_tracker import LastChatTracker
 from .core.weather_sensor import WeatherSensor
 from .domain.schedule import detect_static_overlaps
 from .integrations.chat_memory_history import is_chat_memory_takeover_applied
 from .services.time_context_service import TimeContextService
 from .services.daily_schedule_service import DailyScheduleService
+from .services.persona_summary_service import PersonaSummaryService
 from .services.adaptive_policy import (
     AdaptiveConcurrencyGate,
     AdaptiveGenerationPolicy,
@@ -95,6 +97,15 @@ class TimeAwarenessPlugin(Star):
             concurrency_gate=self.llm_gate,
             weather_forecast_provider=self.weather_sensor.daily_forecast,
         )
+        # 人设预萃取：独立 provider 配置（生成用 flash、萃取可用 pro）
+        self.persona_summary_store = PersonaSummaryStore(self.data_dir)
+        self.persona_summary = PersonaSummaryService(
+            context=self.context,
+            config=self.config,
+            store=self.persona_summary_store,
+            concurrency_gate=self.llm_gate,
+        )
+        self.daily_schedule_service.set_persona_summary_service(self.persona_summary)
         self.time_context.set_daily_schedule_service(self.daily_schedule_service)
         # 人格日程人工编辑服务（WebUI 查询/编辑快照，与生成服务共用锁）
         self.daily_schedule_admin = DailyScheduleAdminService(
@@ -155,6 +166,7 @@ class TimeAwarenessPlugin(Star):
         daily_store_ready = False
         if self.daily_schedule_service.configured_enabled():
             daily_store_ready = self.daily_schedule_store.load()
+        self.persona_summary_store.load()
         self.daily_schedule_service.set_available(daily_store_ready)
 
         self.calendar_runtime.initialize_builtin_events()
@@ -475,6 +487,21 @@ class TimeAwarenessPlugin(Star):
     @schedule_group.command("static")
     async def schedule_static(self, event: AstrMessageEvent):
         yield event.plain_result(self.schedule_commands.static())
+
+    @schedule_group.command("summary")
+    async def schedule_summary(self, event: AstrMessageEvent):
+        session = event.unified_msg_origin or ""
+        yield event.plain_result(
+            await self.schedule_commands.summary(session, event=event)
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @schedule_group.command("summary_rebuild")
+    async def schedule_summary_rebuild(self, event: AstrMessageEvent):
+        session = event.unified_msg_origin or ""
+        yield event.plain_result(
+            await self.schedule_commands.summary_rebuild(session, event=event)
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @schedule_group.command("regenerate")

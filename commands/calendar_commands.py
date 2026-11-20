@@ -12,7 +12,10 @@ from ..llm.calendar_generator import (
     build_system_prompt,
     generate_calendar_events,
 )
-from ..services.adaptive_policy import AdaptiveConcurrencyGate
+from ..services.adaptive_policy import (
+    AdaptiveConcurrencyGate,
+    AdaptiveGenerationPolicy,
+)
 from .calendar_helpers import (
     category_short_tag,
     describe_repeat,
@@ -270,19 +273,19 @@ class CalendarCommands:
         except (TypeError, ValueError):
             max_events = DEFAULT_MAX_GENERATE
         max_events = max(1, min(200, max_events))
+        policy = AdaptiveGenerationPolicy.from_config(self.config).effective()
         held = False
         try:
             if self._llm_gate is not None:
-                held = await self._llm_gate.acquire_configured(self.config)
-                if not held:
-                    yield "插件全局 LLM 并发等待超时，请稍后重试。"
-                    return
+                await self._llm_gate.acquire_wait(policy.max_concurrent_llm)
+                held = True
             events = await generate_calendar_events(
                 self.context,
                 provider_id=provider_id,
                 user_prompt=theme,
                 system_prompt=build_system_prompt(now.year, max_events),
                 current_year=now.year,
+                max_attempts=policy.max_attempts,
             )
         finally:
             if held:

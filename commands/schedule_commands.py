@@ -45,6 +45,8 @@ class ScheduleCommands:
             "/schedule show  — 查看当前 Persona 今天实际使用的日程\n"
             "/schedule static  — 查看静态日程表\n"
             "/schedule regenerate [天数|all]  — 重新生成今日（默认）/ 前 N 天 / 整个注入窗口的 AI 日程（管理员）\n"
+            "/schedule summary  — 查看当前人格的人设摘要（日程生成用它替代全量人设）\n"
+            "/schedule summary_rebuild  — 强制重建人设摘要（管理员）\n"
             "/schedule help  — 显示本帮助\n"
             "\n"
             "说明：\n"
@@ -159,6 +161,16 @@ class ScheduleCommands:
         except ValueError:
             return 1
         return max(1, min(PLAN_MAX_PRE_GENERATE_DAYS, days))
+
+    async def summary(self, session: str, *, event=None) -> str:
+        """查看当前人格的人设摘要（未萃取时提示下一步）。"""
+        return await self.daily_schedule_service.summary_report(session, event=event)
+
+    async def summary_rebuild(self, session: str, *, event=None) -> str:
+        """强制重萃取当前人格的人设摘要（清缓存重跑一次 LLM）。"""
+        return await self.daily_schedule_service.summary_report(
+            session, event=event, rebuild=True
+        )
 
     async def regenerate(self, session: str, *, event=None, target: str = "") -> AsyncIterator[str]:
         if not self.daily_schedule_service.enabled():

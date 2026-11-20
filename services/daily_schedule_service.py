@@ -37,7 +37,10 @@ from ..domain.timeline import (
     render_effective_timeline,
 )
 from ..domain.schedule_edit import MAX_STATE_LENGTH, day_minute_of
-from ..integrations.persona_resolver import resolve_effective_persona
+from ..integrations.persona_resolver import (
+    extract_persona_prompt,
+    resolve_effective_persona,
+)
 from .adaptive_policy import AdaptiveGenerationPolicy, EnhancedContext
 from .adaptive_policy import AdaptiveConcurrencyGate
 from .daily_schedule_generation import (
@@ -47,6 +50,9 @@ from .daily_schedule_generation import (
     exception_detail,
 )
 from ..log import logger, tag
+
+# 生成锁的回收窗口（天）：锁键里带日期，过去的日期不会再生成，留 2 天只为覆盖时区边界
+STATE_RETENTION_DAYS = 2
 
 @dataclass(frozen=True)
 class ScheduleResolution:
@@ -122,6 +128,8 @@ class DailyScheduleService:
         self._representative_sessions: dict[str, str] = {}
         # UMO 最后活跃时间（保活：一整天未出现的 UMO 删除；仅进程内存）
         self._session_active_at: dict[str, datetime.datetime] = {}
+        # 人设预萃取服务（可选注入）：未注入时生成侧一律用全量人设
+        self.persona_summary = None
         self._locks: dict[str, asyncio.Lock] = {}
         # 上次回收内存表的时间：每日循环没跑时也要有别的入口兜底
         self._last_gc: datetime.datetime | None = None
@@ -166,20 +174,8 @@ class DailyScheduleService:
         return max(1, min(365, value))
 
     def state_retention_days(self) -> int:
-        """全局运行期状态保留期（天）；缺省/非法回退 7，与 AI 快照文件自身 retention_days 无关。"""
-        runtime = self.config.get("runtime", {})
-        raw_value = (
-            runtime.get("state_retention_days", 7)
-            if isinstance(runtime, dict)
-            else 7
-        )
-        if raw_value is None:
-            raw_value = 7
-        try:
-            value = int(raw_value)
-        except (TypeError, ValueError):
-            value = 7
-        return max(1, min(365, value))
+        """生成锁的回收窗口（天，写死）：只影响 ``_locks``，与会话活跃记录无关。"""
+        return STATE_RETENTION_DAYS
 
     def _cleanup_stale_locks(self) -> int:
         """回收已过期、未锁定的日程生成锁，防止 ``_locks`` 无界增长；活动锁一律保留。"""
@@ -343,6 +339,59 @@ class DailyScheduleService:
         if trigger:
             self.queue_generation(session)
         return persona_hash
+
+    def set_persona_summary_service(self, service) -> None:
+        """注入人设预萃取服务；同时转发给生成器（生成侧只在有服务时才会用摘要）。"""
+        self.persona_summary = service
+        self.generation.set_persona_summary_service(service)
+
+    async def current_persona_prompt(
+        self, session: str, *, event: Any = None
+    ) -> tuple[str, str]:
+        """当前会话生效人格的原始 prompt 与标签（供摘要查看/重建使用）。"""
+        resolved_id, persona = await self._resolve_persona(session, event)
+        return extract_persona_prompt(persona), str(resolved_id or "").strip()
+
+    async def summary_report(
+        self, session: str, *, event: Any = None, rebuild: bool = False
+    ) -> str:
+        """``/schedule summary`` 与 ``/schedule summary_rebuild`` 的正文。"""
+        service = self.persona_summary
+        if service is None:
+            return "人设预萃取服务未初始化。"
+        if not service.enabled():
+            return (
+                "人设预萃取已关闭（daily_schedule.ai_daily.persona_summary_enabled=false），"
+                "生成时会使用全量人设。"
+            )
+        prompt, label = await self.current_persona_prompt(session, event=event)
+        if not prompt:
+            return "无法取到当前人设文本（未配置 Persona，或 use_persona 已关闭）。"
+        if not rebuild:
+            return service.describe(prompt)
+        try:
+            fallback = await self.generation._resolve_provider_id()
+        except Exception as exc:
+            logger.warning(
+                f"{tag()} ⚠️ 重建摘要时取不到生成模型（{type(exc).__name__}），改用萃取模型自己的配置"
+            )
+            fallback = ""
+        result = await service.ensure(
+            prompt,
+            fallback_provider_id=fallback,
+            persona_label=label,
+            force=True,
+        )
+        if not result.usable:
+            return (
+                f"❌ 重建人设摘要失败：{result.error or result.status}。"
+                "原缓存仍保留，生成时继续使用它或全量人设。"
+            )
+        logger.info(
+            f"{tag()} 🧬 人设摘要已重建: persona={label or '-'} "
+            f"model={result.model} 字数={len(result.text)}"
+        )
+        return "✅ 已重建人设摘要（模型 " + str(result.model) + "）\n\n" + service.describe(prompt)
 
     def _maybe_gc(self, now: datetime.datetime) -> None:
         """按小时节流地回收会话表与过期生成锁（每日循环缺席时它们只增不减）。"""
@@ -851,7 +900,6 @@ class DailyScheduleService:
                         retryable=True,
                         calls_executed=generated.calls_executed,
                     )
-                skipped = ",".join(generated.skipped) or "-"
                 logger.info(
                     f"{tag()} ✅ AI 每日日程就绪: persona={persona_label} "
                     f"date={local_date.isoformat()} source={generated.source} "
@@ -859,8 +907,7 @@ class DailyScheduleService:
                 )
                 logger.debug(
                     f"{tag()} 生成细节: provider={generated.provider_id} "
-                    f"calls={generated.calls_executed} skipped={skipped} "
-                    f"context_tokens={generated.context_tokens} "
+                    f"calls={generated.calls_executed} "
                     f"boundary_state={'yes' if generated.boundary_state else 'no'}"
                 )
                 return GenerationResult(
@@ -921,19 +968,16 @@ class DailyScheduleService:
         now: datetime.datetime,
         finalize_previous: bool = True,
     ) -> EnhancedContext:
-        """采集增强上下文原始结构；Token 裁剪由 generation 层统一完成。"""
+        """采集增强上下文（内容量由 recent_days 与单日昨日状态界定，不做 token 裁剪）。"""
         policy = await self.generation.policy()
         if not policy.enabled:
             return EnhancedContext()
-        skipped: list[str] = []
         recent_text = ""
         recent_snapshots: tuple[dict, ...] = ()
         if policy.use_recent_schedules:
             recent_text, recent_snapshots = self._recent_schedules_text(
                 persona_hash, policy, now
             )
-            if not recent_text:
-                skipped.append("recent_schedules:no_data")
 
         previous_day_state = None
         if policy.state_continuity_enabled:
@@ -950,7 +994,6 @@ class DailyScheduleService:
             recent_schedules_text=recent_text,
             recent_snapshots=recent_snapshots,
             previous_day_state=previous_day_state,
-            skipped=tuple(skipped),
         )
 
     def _recent_schedules_text(

@@ -34,7 +34,6 @@ BUILTIN_SELECT_CATEGORY_MAP = {
     "international": CATEGORY_INTERNATIONAL,
 }
 
-_LEGACY_BUILTIN_TRUE_DEFAULTS = frozenset({"legal_holidays", "traditional", "solar_terms"})
 
 
 @dataclass(frozen=True)
@@ -118,27 +117,21 @@ class TimeFactsCollector:
     def time_guidance_enabled(self) -> bool:
         return bool(self._time_config().get("time_guidance_enabled", True))
 
-    def _time_sensor_selection(self) -> set[str] | None:
-        """读取 ``time_sensors`` 多选列表；None 表示未迁移，回退旧布尔形态。"""
+    def _time_sensor_selection(self) -> set[str]:
+        """读取 ``time_sensors`` 多选列表。"""
         value = self._time_config().get("time_sensors")
         if not isinstance(value, list):
-            return None
+            return set()
         return {str(v) for v in value if str(v) in SENSOR_SELECT_KEYS}
 
-    def _sensor_enabled(self, key: str, legacy_key: str, default: bool) -> bool:
-        selection = self._time_sensor_selection()
-        if selection is not None:
-            return key in selection
-        return bool(self._time_config().get(legacy_key, default))
-
     def workday_enabled(self) -> bool:
-        return self._sensor_enabled("workday", "workday_state_enabled", True)
+        return "workday" in self._time_sensor_selection()
 
     def lunar_enabled(self) -> bool:
-        return self._sensor_enabled("lunar", "lunar_state_enabled", True)
+        return "lunar" in self._time_sensor_selection()
 
     def almanac_enabled(self) -> bool:
-        return self._sensor_enabled("almanac", "almanac_enabled", False)
+        return "almanac" in self._time_sensor_selection()
 
     def last_chat_enabled(self) -> bool:
         return bool(self._time_config().get("last_chat_enabled", True))
@@ -146,22 +139,12 @@ class TimeFactsCollector:
     def enabled_builtin_categories(self) -> list[str]:
         calendar_config = self._calendar_config()
         value = calendar_config.get("builtin_event_categories")
-        if isinstance(value, list):
-            return [
-                BUILTIN_SELECT_CATEGORY_MAP[str(v)]
-                for v in value
-                if str(v) in BUILTIN_SELECT_CATEGORY_MAP
-            ]
-        # 兼容旧形态（未迁移的存量配置）
-        if not calendar_config.get("enable_builtin_events", True):
+        if not isinstance(value, list):
             return []
-        builtin_config = calendar_config.get("builtin_events", {})
-        if not isinstance(builtin_config, dict):
-            builtin_config = {}
         return [
-            category
-            for key, category in BUILTIN_SELECT_CATEGORY_MAP.items()
-            if builtin_config.get(key, key in _LEGACY_BUILTIN_TRUE_DEFAULTS)
+            BUILTIN_SELECT_CATEGORY_MAP[str(v)]
+            for v in value
+            if str(v) in BUILTIN_SELECT_CATEGORY_MAP
         ]
 
     def today_events_text(self, *, now: datetime.datetime) -> str:

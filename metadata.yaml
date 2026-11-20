@@ -2,7 +2,7 @@ name: time_awareness
 display_name: TimeAwareness
 short_desc: 现实时间、角色日程与世界观日历。
 desc: 为 LLM 注入自然时间规则、现实时间、角色时段状态和日历感知；静态规则使用 system_prompt，动态内容使用临时 extra_user_content_parts，不污染历史。
-version: v2.3.4
+version: v2.3.5
 author: Wolfycz
 astrbot_version: ">=4.26.0,<5"
 tags: [ "时笺", "日历", "日程表" ]

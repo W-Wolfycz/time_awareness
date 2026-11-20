@@ -18,7 +18,7 @@ def _config():
     return {
         "daily_schedule": {"enable_schedule": False},
         "time_awareness": {"time_guidance_enabled": True, "time_sensors": []},
-        "calendar": {"enable_builtin_events": False},
+        "calendar": {"builtin_event_categories": []},
     }
 
 
@@ -82,7 +82,7 @@ def test_schedule_tool_injection_follows_config(tmp_path, monkeypatch):
                 "ai_daily": {"enabled": True, "allow_ai_edit": True},
             },
             "time_awareness": {"time_guidance_enabled": True, "time_sensors": []},
-            "calendar": {"enable_builtin_events": False},
+            "calendar": {"builtin_event_categories": []},
         }
         on = TimeAwarenessPlugin(FakeContext(), config)
         await on.initialize()
@@ -111,7 +111,7 @@ def test_schedule_tool_injection_follows_config(tmp_path, monkeypatch):
                 "ai_daily": {"enabled": True, "allow_ai_edit": True},
             },
             "time_awareness": {"time_guidance_enabled": False, "time_sensors": []},
-            "calendar": {"enable_builtin_events": False},
+            "calendar": {"builtin_event_categories": []},
         }
         off_guidance = TimeAwarenessPlugin(FakeContext(), muted)
         await off_guidance.initialize()

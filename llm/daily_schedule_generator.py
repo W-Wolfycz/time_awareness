@@ -412,17 +412,38 @@ def deterministic_score(
     return round(score, 4)
 
 
+def request_kwargs(max_attempts: int = 0) -> dict:
+    """插件调用的固定请求参数。
+
+    ``max_attempts > 0``：钉 ``request_max_retries=1``，把重试权收回到插件配置。
+    AstrBot 默认会在 provider 层再重试 5 次（``request_retry.py`` 的 REQUEST_RETRY_ATTEMPTS，
+    且超时属于可重试错误），配置成 2 次实际会打出 2×5 次请求。
+
+    ``max_attempts == 0``：不钉，完全交给 AstrBot 的默认重试策略。
+
+    请求超时不在这里设：AstrBot 的超时是 provider 级配置，需要更长的后台超时请在
+    AstrBot 里单独建一个模型提供商条目（超时时间设长），再把 ``ai_daily.provider_id``
+    指向它。
+    """
+    kwargs: dict = {}
+    if max_attempts > 0:
+        kwargs["request_max_retries"] = 1
+    return kwargs
+
+
 async def generate_daily_schedule(
     context: Any,
     *,
     provider_id: str,
     prompt: str,
+    max_attempts: int = 0,
 ) -> tuple[PlanningResult, str]:
     """调用 Provider 并返回已经过数组协议校验的规划结果和原始文本。"""
     response = await context.llm_generate(
         chat_provider_id=provider_id,
         prompt=prompt,
         system_prompt=DEFAULT_DAILY_SCHEDULE_SYSTEM_PROMPT,
+        **request_kwargs(max_attempts),
     )
     if not response or getattr(response, "role", "") != "assistant":
         raise ScheduleValidationError("LLM 响应角色异常")
@@ -440,12 +461,14 @@ async def evaluate_boundary(
     *,
     provider_id: str,
     prompt: str,
+    max_attempts: int = 0,
 ) -> dict:
     """Step1：评估当日初始日界状态（8 维度，别名归一化，稀疏输出）。"""
     response = await context.llm_generate(
         chat_provider_id=provider_id,
         prompt=prompt,
         system_prompt=DEFAULT_BOUNDARY_EVALUATION_SYSTEM_PROMPT,
+        **request_kwargs(max_attempts),
     )
     if not response or getattr(response, "role", "") != "assistant":
         raise ScheduleValidationError("LLM 响应角色异常")
@@ -478,6 +501,7 @@ async def select_candidate_with_llm(
     persona_prompt: str = "",
     recent_schedules_text: str = "",
     continuity_enabled: bool = True,
+    max_attempts: int = 0,
 ) -> int:
     """使用 LLM 在候选中选择最自然且不重复的一个，返回其下标；失败返回 -1。"""
     if len(candidates) < 2:
@@ -510,6 +534,7 @@ async def select_candidate_with_llm(
             chat_provider_id=provider_id,
             prompt=judge_prompt,
             system_prompt=DEFAULT_DAILY_SCHEDULE_JUDGE_SYSTEM_PROMPT,
+            **request_kwargs(max_attempts),
         )
         if not response or getattr(response, "role", "") != "assistant":
             return -1

@@ -20,23 +20,19 @@ def _collector(config, calendar_store=None):
     )
 
 
-def test_sensor_enabled_selector_and_legacy():
-    config = {
-        "time_awareness": {
-            "time_sensors": ["workday"],
-            "workday_state_enabled": False,
-            "lunar_state_enabled": True,
-            "almanac_enabled": True,
-        }
-    }
-    collector = _collector(config)
+def test_sensor_selector():
+    """传感器只由 time_sensors 多选决定；旧布尔键已从 schema 移除，不再回退。"""
+    collector = _collector({"time_awareness": {"time_sensors": ["workday", "almanac"]}})
     assert collector.workday_enabled() is True
-    assert collector.lunar_enabled() is False and collector.almanac_enabled() is False
+    assert collector.lunar_enabled() is False
+    assert collector.almanac_enabled() is True
 
-    legacy = _collector({"time_awareness": {}})
-    assert legacy.workday_enabled() is True and legacy.lunar_enabled() is True
-    assert legacy.almanac_enabled() is False
-    assert _collector({"time_awareness": {"almanac_enabled": True}}).almanac_enabled() is True
+    empty = _collector({"time_awareness": {"time_sensors": []}})
+    assert empty.workday_enabled() is False and empty.lunar_enabled() is False
+    assert empty.almanac_enabled() is False
+
+    missing = _collector({"time_awareness": {}})
+    assert missing.workday_enabled() is False and missing.almanac_enabled() is False
 
 
 def test_workday_kind_distinguishes_workday_weekend_and_holiday():

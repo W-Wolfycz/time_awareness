@@ -7,8 +7,6 @@
 import asyncio
 import datetime
 
-import pytest
-
 from time_awareness.core.daily_schedule_store import DailyScheduleSnapshotStore
 from time_awareness.services.daily_schedule_generation import PROMPT_REVISION
 from time_awareness.services.daily_schedule_service import DailyScheduleService

@@ -3,7 +3,7 @@
     "description": "🤖 日志区分机器人实例",
     "type": "bool",
     "default": false,
-    "hint": "多 Bot 时在日志前缀区分平台实例（[time_awareness][platform:平台ID]）；日志级别跟随 AstrBot 原生配置"
+    "hint": "多 Bot 时日志前缀带平台实例标识（[time_awareness][platform:平台ID]）"
   },
   "runtime": {
     "description": "⚙️ 全局运行时参数",
@@ -13,13 +13,13 @@
         "description": "🌐 插件 LLM 全局并发上限",
         "type": "int",
         "default": 0,
-        "hint": "AI 日程与 /calendar create 共用并发上限（1–4）；0=默认 1"
+        "hint": "AI 日程与 /calendar create 共用并发上限；0=默认 1"
       },
-      "state_retention_days": {
-        "description": "🗑️ 运行期状态保留期限",
+      "llm_max_attempts": {
+        "description": "🔁 所有 LLM 调用的最大尝试次数",
         "type": "int",
-        "default": 7,
-        "hint": "运行期状态保留期（天）：过期日程生成状态与终态锁的回收窗口"
+        "default": 3,
+        "hint": "1–5，0 则使用 AstrBot 默认重试次数。插件内所有 LLM 调用（日程生成/评估/评选/人设萃取/日历创建）均按该次数重试"
       }
     }
   },
@@ -53,10 +53,10 @@
         "hint": "勾选即启用，全不选则都不注入。工作日｜农历｜黄历（黄历建议与农历同开）"
       },
       "upcoming_days": {
-        "description": "🔭 未来日程预告天数",
+        "description": "🔭 未来日历事项预告天数",
         "type": "int",
         "default": 0,
-        "hint": "注入未来 N 天的日期、星期、工作日性质（工作日/周末/调休/节假日）与当天事项，供模型回答「明天/后天」的安排；0=关闭，范围 1–14。事项段要求开启「日历事项设置」且该年内置日历已完整生成，否则整段省略（表示事项未知）"
+        "hint": "注入未来 N 天的日期、星期、工作日性质与日历事项（事件），用于回答「明天/后天有什么安排」；0=关闭"
       },
       "last_chat_enabled": {
         "description": "💬 上次对话时间感知",
@@ -75,27 +75,6 @@
         "type": "string",
         "default": "",
         "hint": "IANA 时区，如 Asia/Shanghai；留空使用系统时区"
-      },
-      "workday_state_enabled": {
-        "description": "📅 工作日性质感知",
-        "type": "bool",
-        "default": true,
-        "hint": "标注今天是工作日、周末、调休工作日或节假日",
-        "invisible": true
-      },
-      "lunar_state_enabled": {
-        "description": "🌙 农历日期感知",
-        "type": "bool",
-        "default": true,
-        "hint": "向 LLM 提供今日农历日期",
-        "invisible": true
-      },
-      "almanac_enabled": {
-        "description": "📜 黄历感知",
-        "type": "bool",
-        "default": false,
-        "hint": "向 LLM 提供今日干支、冲煞和宜忌；建议与农历感知一同启用",
-        "invisible": true
       }
     }
   },
@@ -127,7 +106,7 @@
                 "description": "🏷️ 名称",
                 "type": "string",
                 "default": "",
-                "hint": "时段标签，如「晨起」「午休」「深夜」"
+                "hint": "时段标签，仅用于展示与日志"
               },
               "start_time": {
                 "description": "▶️ 开始时间（HH:MM）",
@@ -145,7 +124,7 @@
                 "description": "💬 状态描述(<SCHEDULE_STATE>)",
                 "type": "text",
                 "default": "",
-                "hint": "50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
+                "hint": "建议 50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
               }
             }
           },
@@ -159,7 +138,7 @@
                 "description": "🏷️ 名称",
                 "type": "string",
                 "default": "午餐",
-                "hint": "时段标签，仅用于展示和日志"
+                "hint": "时段标签，仅用于展示与日志"
               },
               "start_time": {
                 "description": "▶️ 开始时间（HH:MM）",
@@ -177,7 +156,7 @@
                 "description": "💬 状态描述(<SCHEDULE_STATE>)",
                 "type": "text",
                 "default": "正在吃午餐或刚结束午餐。按人设自然回应——可提及咀嚼、餐具、餐桌氛围、饭后犯困或午间小憩的打算，语气放松从容，不因进食打断对话节奏。",
-                "hint": "50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
+                "hint": "建议 50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
               }
             }
           },
@@ -191,7 +170,7 @@
                 "description": "🏷️ 名称",
                 "type": "string",
                 "default": "晚餐",
-                "hint": "时段标签，仅用于展示和日志"
+                "hint": "时段标签，仅用于展示与日志"
               },
               "start_time": {
                 "description": "▶️ 开始时间（HH:MM）",
@@ -209,7 +188,7 @@
                 "description": "💬 状态描述(<SCHEDULE_STATE>)",
                 "type": "text",
                 "default": "正在吃晚餐或刚结束晚餐。按人设自然回应——可提及饭菜、餐桌氛围、饭后散步或收拾碗筷，语气松弛，带一点一天将尽的回味感，不打断对话节奏。",
-                "hint": "50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
+                "hint": "建议 50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
               }
             }
           },
@@ -223,7 +202,7 @@
                 "description": "🏷️ 名称",
                 "type": "string",
                 "default": "睡眠",
-                "hint": "时段标签，仅用于展示和日志"
+                "hint": "时段标签，仅用于展示与日志"
               },
               "start_time": {
                 "description": "▶️ 开始时间（HH:MM）",
@@ -241,7 +220,7 @@
                 "description": "💬 状态描述(<SCHEDULE_STATE>)",
                 "type": "text",
                 "default": "刚被消息叫醒或正在半梦半醒之间。按人设自然回应——可带困意、含糊、迟疑、不情愿，但不拒绝对话；允许偶尔走神、把话说半句、打哈欠。",
-                "hint": "50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
+                "hint": "建议 50–200 字，描述生理/情绪/语气状态；无需 XML 标签"
               }
             }
           }
@@ -282,6 +261,26 @@
             },
             "hint": "把当前 Persona prompt 作为生成依据，建议开启；关闭仍按 Persona 身份隔离"
           },
+          "persona_summary_enabled": {
+            "description": "🧬 启用日程人设预萃取",
+            "type": "bool",
+            "default": false,
+            "condition": {
+              "use_persona": true
+            },
+            "hint": "把角色提示词提炼成一份作息档案——身份与职责、活动场所、作息锚点、体质、兴趣、社交关系、禁忌与常用物品——模型照着这份档案安排一天，日程更贴人设，生成也更快更省"
+          },
+          "persona_summary_provider_id": {
+            "description": "🤖 萃取使用的模型",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider",
+            "condition": {
+              "persona_summary_enabled": true,
+              "use_persona": true
+            },
+            "hint": "不选择时跟随主对话模型"
+          },
           "worldview": {
             "description": "🌍 世界观 / 长期背景",
             "type": "text",
@@ -290,15 +289,6 @@
               "enabled": true
             },
             "hint": "稳定的时代/地点/职业/生活背景；每日变化主题由模型自行生成"
-          },
-          "max_attempts": {
-            "description": "🔁 单步 LLM 最大尝试次数",
-            "type": "int",
-            "default": 3,
-            "condition": {
-              "enabled": true
-            },
-            "hint": "1–5，含首次；作用于角色状态评估、方案生成与重复检测/评选，不会整套流程重复"
           },
           "generation_time": {
             "description": "⏰ 每日生成时刻",
@@ -316,16 +306,16 @@
             "condition": {
               "enabled": true
             },
-            "hint": "AI 输出时段数的期望值（约这个数，可多可少，不是硬上限；超出 60 条会被防失控安全上限截断）"
+            "hint": "AI 输出时段数的期望值（1–48，约这个数不是硬上限）；模型若输出超过 60 段，整体判为异常并重试"
           },
           "retention_days": {
-            "description": "🗃️ 快照保留天数",
+            "description": "🗃️ 日程快照保留天数",
             "type": "int",
             "default": 30,
             "condition": {
               "enabled": true
             },
-            "hint": "快照保留天数（1–365，含当天）；不存原始 ID/prompt/历史"
+            "hint": "AI 生成的日程快照保留多少天（1–365，含当天）。快照是落盘的日程数据——每天生成的那份时段表，含已执行记录和你手改过的时段；它同时供「参考最近日程」与回看使用"
           },
           "ai_priority_over_static": {
             "description": "🛡️ AI 优先于静态日程",
@@ -362,7 +352,7 @@
             "condition": {
               "enabled": true
             },
-            "hint": "对话里注入多远的日程计划（含今天剩余与之后几天，按天分段）；0=不注入计划。预生成天数按触发模式与窗口自动反推——保证任一时刻的未来注入窗口都有计划日程"
+            "hint": "对话里注入多远的日程计划（从当前时刻起，按天分段）；0=不注入计划"
           },
           "random_weather_enabled": {
             "description": "🎲 启用随机天气",
@@ -494,31 +484,6 @@
                   "enabled": true
                 },
                 "hint": "heuristic=本地评分不增调用；llm=额外模型评选，失败回退 heuristic；方案数>1 才生效"
-              },
-              "context_token_budget": {
-                "description": "📏 增强上下文 Token 上限",
-                "type": "int",
-                "default": 0,
-                "condition": {
-                  "enabled": true
-                },
-                "hint": "增强上下文 Token 上限；0=自动按 Provider 窗口 80% 分配（取不到回退 8000）"
-              },
-              "max_concurrent_llm": {
-                "description": "🌐 全局并发上限（旧位置·兼容回退）",
-                "type": "int",
-                "default": 1,
-                "invisible": true,
-                "hint": "旧位置兼容回退：顶层 runtime.llm_max_concurrency 优先（1–4）；未配置或为 0 时才用此值（AI 日程共用）"
-              },
-              "acquire_timeout_seconds": {
-                "description": "⏳ 并发等待超时",
-                "type": "int",
-                "default": 10,
-                "condition": {
-                  "enabled": true
-                },
-                "hint": "等并发槽位超时秒数（0–120）；超时回退旧快照/静态日程，不阻塞消息"
               }
             }
           }
@@ -537,7 +502,7 @@
         "hint": "注入当日事项；无事项不注入"
       },
       "ai_generate_provider_id": {
-        "description": "🤖 AI 生成日历使用的模型(provider_id)",
+        "description": "🤖 日历生成使用的模型",
         "type": "string",
         "default": "",
         "_special": "select_provider",
@@ -578,50 +543,6 @@
           "solar_terms"
         ],
         "hint": "勾选任意分类即启用内置现实事件，全不选则关闭；每年自动更新"
-      },
-      "enable_builtin_events": {
-        "description": "✅ 启用内置现实日历事件",
-        "type": "bool",
-        "default": true,
-        "hint": "自动提供节假日、传统节日和节气等现实事件，每年更新",
-        "invisible": true
-      },
-      "builtin_events": {
-        "description": "📅 内置事件分类开关",
-        "type": "object",
-        "items": {
-          "legal_holidays": {
-            "description": "🏷️ 法定节假日（含调休）",
-            "type": "bool",
-            "default": true,
-            "hint": "元旦/春节/清明/劳动节/端午/中秋/国庆。数据来自 chinese_calendar 库（每年更新调休）。正日子当天显示「X 节」，调休日显示「X 节假期」"
-          },
-          "traditional": {
-            "description": "🏮 传统农历节日",
-            "type": "bool",
-            "default": true,
-            "hint": "元宵/龙抬头/上巳/七夕/中元/重阳/寒衣/下元/腊八/小年/除夕"
-          },
-          "solar_terms": {
-            "description": "🌿 二十四节气",
-            "type": "bool",
-            "default": true,
-            "hint": "立春/雨水/.../大寒 共 24 个，每月约 2 个"
-          },
-          "political": {
-            "description": "🏛️ 政治纪念日",
-            "type": "bool",
-            "default": false,
-            "hint": "植树节/五四青年节/教师节/建党节/建军节/抗战胜利纪念日/烈士纪念日/国家公祭日"
-          },
-          "international": {
-            "description": "🌎 国际/西方节日",
-            "type": "bool",
-            "default": false,
-            "hint": "情人节/妇女节/愚人节/儿童节/万圣节/平安夜/圣诞节/母亲节/父亲节/感恩节/复活节"
-          }
-        },
-        "invisible": true
       }
     }
   }

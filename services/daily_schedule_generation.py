@@ -9,7 +9,6 @@ from typing import Any, Awaitable, Callable
 
 from ..domain.schedule import _CONTROL_CHARS, ai_daily_config, schedule_similarity
 from ..integrations.persona_resolver import extract_persona_prompt, resolve_effective_persona
-from ..constants import DEFAULT_DAILY_SCHEDULE_SYSTEM_PROMPT
 from ..log import logger, tag
 from ..llm.daily_schedule_generator import (
     json_block,
@@ -23,12 +22,10 @@ from ..llm.daily_schedule_generator import (
 )
 from dataclasses import replace as dc_replace
 from .adaptive_policy import (
-    DEFAULT_ENHANCED_CONTEXT_TOKENS,
     SIMILARITY_REPEAT_THRESHOLD,
     AdaptiveConcurrencyGate,
     AdaptiveGenerationPolicy,
     EnhancedContext,
-    estimate_text_tokens,
     resolve_ai_generation_config,
 )
 
@@ -54,7 +51,6 @@ class GeneratedDailySchedule:
     boundary_state: dict = field(default_factory=dict)
     calls_executed: int = 1
     skipped: tuple[str, ...] = ()
-    context_tokens: int = 0
     regenerated_for_similarity: bool = False
 
 
@@ -104,6 +100,11 @@ class DailyScheduleGeneration:
         self._gate = concurrency_gate or AdaptiveConcurrencyGate(
             AdaptiveGenerationPolicy.from_config(config).max_concurrent_llm
         )
+        # 人设预萃取服务：由 service 层注入；未注入时一律用全量人设
+        self._persona_summary = None
+
+    def set_persona_summary_service(self, service) -> None:
+        self._persona_summary = service
 
     async def policy(self) -> AdaptiveGenerationPolicy:
         """返回实际生效策略（总开关关闭时子配置残留一律不生效）。"""
@@ -232,14 +233,6 @@ class DailyScheduleGeneration:
                 today_boundary=None,
                 previous_day_state=None,
             )
-        enhanced = self._fit_enhanced_context(
-            enhanced=enhanced,
-            provider_id=provider_id,
-            now=now,
-            persona_prompt=persona_prompt,
-            sensors=sensors,
-            policy=policy,
-        )
         result, executed, extra_skipped, anti_repeat = await self._plan_schedule(
             policy=policy,
             provider_id=provider_id,
@@ -260,7 +253,6 @@ class DailyScheduleGeneration:
             boundary_state=enhanced.today_boundary or empty_boundary(),
             calls_executed=calls_executed,
             skipped=tuple(skipped),
-            context_tokens=enhanced.used_tokens,
             regenerated_for_similarity=anti_repeat is not None,
         )
 
@@ -354,20 +346,18 @@ class DailyScheduleGeneration:
             forecast=forecast,
         )
         calls = 0
-        for attempt in range(policy.max_attempts):
+        for attempt in range(max(1, policy.max_attempts)):
             if attempt > 0:
                 await self._sleep(_retry_delay_seconds(attempt))
-            held = await self._gate.acquire(policy.acquire_timeout_seconds)
-            if not held:
-                if attempt + 1 < policy.max_attempts:
-                    continue
-                raise DailyScheduleGenerationError(
-                    "concurrency_timeout", "并发额度耗尽，使用旧快照/静态日程",
-                    retryable=True, calls_executed=calls)
+            # 队列不设超时：一直等到有空槽（并发上限由配置决定）
+            await self._gate.acquire_wait(policy.max_concurrent_llm)
             try:
                 calls += 1
                 result, _ = await generate_daily_schedule(
-                    self.context, provider_id=provider_id, prompt=prompt,
+                    self.context,
+                    provider_id=provider_id,
+                    prompt=prompt,
+                    max_attempts=policy.max_attempts,
                 )
                 return result, calls, (["planning:retried"] if attempt else [])
             except Exception as exc:
@@ -458,16 +448,17 @@ class DailyScheduleGeneration:
             """返回 (候选或 None, LLM 调用数, 首个失败详情)；候选只携带 slots。"""
             calls = 0
             first_error = ""
-            for attempt in range(policy.max_attempts):
+            for attempt in range(max(1, policy.max_attempts)):
                 if attempt > 0:
                     await self._sleep(_retry_delay_seconds(attempt))
-                held = await self._gate.acquire(policy.acquire_timeout_seconds)
-                if not held:
-                    continue
+                await self._gate.acquire_wait(policy.max_concurrent_llm)
                 try:
                     calls += 1
                     result, _ = await generate_daily_schedule(
-                        self.context, provider_id=provider_id, prompt=base_prompt,
+                        self.context,
+                        provider_id=provider_id,
+                        prompt=base_prompt,
+                        max_attempts=policy.max_attempts,
                     )
                     return {"index": index, "slots": result.slots}, calls, ""
                 except Exception as exc:
@@ -508,7 +499,7 @@ class DailyScheduleGeneration:
                     enhanced,
                     continuity_enabled=policy.state_continuity_enabled,
                 ),
-                acquire_timeout_seconds=policy.acquire_timeout_seconds,
+                max_concurrent_llm=policy.max_concurrent_llm,
                 max_attempts=policy.max_attempts,
                 persona_prompt=persona_prompt,
                 recent_schedules_text=enhanced.recent_schedules_text,
@@ -553,7 +544,7 @@ class DailyScheduleGeneration:
         provider_id: str,
         valid: list[dict],
         prompt_hint: str,
-        acquire_timeout_seconds: float,
+        max_concurrent_llm: int,
         max_attempts: int,
         persona_prompt: str = "",
         recent_schedules_text: str = "",
@@ -561,12 +552,10 @@ class DailyScheduleGeneration:
     ) -> tuple[int | None, int]:
         """返回（选择下标或 None，实际调用数）。"""
         calls = 0
-        for attempt in range(max_attempts):
+        for attempt in range(max(1, max_attempts)):
             if attempt > 0:
                 await self._sleep(_retry_delay_seconds(attempt))
-            held = await self._gate.acquire(acquire_timeout_seconds)
-            if not held:
-                continue
+            await self._gate.acquire_wait(max_concurrent_llm)
             try:
                 calls += 1
                 choice = await select_candidate_with_llm(
@@ -574,11 +563,15 @@ class DailyScheduleGeneration:
                     prompt_hint=prompt_hint,
                     persona_prompt=persona_prompt,
                     recent_schedules_text=recent_schedules_text,
-                    continuity_enabled=continuity_enabled)
+                    continuity_enabled=continuity_enabled,
+                    max_attempts=max_attempts)
                 if choice >= 0:
                     return choice, calls
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    f"{tag()} ⚠️ 候选评选第 {attempt + 1}/{max_attempts} 次失败: "
+                    f"{exception_detail(exc)}"
+                )
             finally:
                 await self._gate.release()
         return None, calls
@@ -609,202 +602,6 @@ class DailyScheduleGeneration:
 
     # ---------------- 增强上下文 Token 预算 ----------------
 
-    def _fit_enhanced_context(
-        self,
-        *,
-        enhanced: EnhancedContext,
-        provider_id: str,
-        now,
-        persona_prompt: str,
-        sensors: dict,
-        policy: AdaptiveGenerationPolicy,
-    ) -> EnhancedContext:
-        if not (enhanced.previous_day_state or enhanced.recent_schedules_text):
-            return enhanced
-
-        automatic_budget = self._automatic_enhanced_token_budget(
-            provider_id=provider_id,
-            now=now,
-            persona_prompt=persona_prompt,
-            sensors=sensors,
-            policy=policy,
-        )
-        manual_budget = max(0, int(policy.context_token_budget or 0))
-        if manual_budget > 0:
-            budget = (
-                min(manual_budget, automatic_budget)
-                if automatic_budget is not None
-                else manual_budget
-            )
-        else:
-            budget = (
-                automatic_budget
-                if automatic_budget is not None
-                else DEFAULT_ENHANCED_CONTEXT_TOKENS
-            )
-        budget = max(0, int(budget))
-
-        skipped = list(enhanced.skipped)
-        used = 0
-        previous_day_state = None
-        recent_text = ""
-        recent_snapshots = enhanced.recent_snapshots
-
-        if enhanced.previous_day_state:
-            full_block = json_block(
-                "PREVIOUS_DAY_STATE", enhanced.previous_day_state
-            )
-            full_tokens = estimate_text_tokens(full_block)
-            if full_tokens <= budget:
-                previous_day_state = enhanced.previous_day_state
-                used += full_tokens
-            else:
-                previous_day_state = self._trim_previous_day_state(
-                    enhanced.previous_day_state,
-                    budget,
-                )
-                if previous_day_state:
-                    used += estimate_text_tokens(
-                        json_block("PREVIOUS_DAY_STATE", previous_day_state)
-                    )
-                    skipped.append("previous_day_state:truncated")
-                else:
-                    skipped.append("previous_day_state:budget_exhausted")
-
-        if enhanced.recent_schedules_text:
-            remaining = max(0, budget - used)
-            recent_text = self._trim_recent_schedules_text(
-                enhanced.recent_schedules_text,
-                remaining,
-            )
-            if recent_text:
-                used += estimate_text_tokens(
-                    json_block("RECENT_SCHEDULES", {"content": recent_text})
-                )
-                if recent_text != enhanced.recent_schedules_text:
-                    skipped.append("recent_schedules:truncated")
-            else:
-                recent_snapshots = ()
-                skipped.append("recent_schedules:budget_exhausted")
-
-        return EnhancedContext(
-            recent_schedules_text=recent_text,
-            recent_snapshots=recent_snapshots,
-            previous_day_state=previous_day_state,
-            # Step1 产物：当日初始角色状态，原样透传给 Step2（不裁剪）
-            today_boundary=enhanced.today_boundary,
-            used_tokens=used,
-            skipped=tuple(skipped),
-        )
-
-    def _automatic_enhanced_token_budget(
-        self,
-        *,
-        provider_id: str,
-        now,
-        persona_prompt: str,
-        sensors: dict,
-        policy: AdaptiveGenerationPolicy,
-    ) -> int | None:
-        context_limit = self._provider_context_limit(provider_id)
-        if context_limit is None:
-            return None
-        target_input_tokens = max(0, int(context_limit * 0.8))
-        base_prompt = self._build_prompt(
-            now=now,
-            persona_prompt=persona_prompt,
-            sensors=sensors,
-            policy=policy,
-            enhanced=EnhancedContext(),
-            anti_repeat=None,
-        )
-        base_tokens = estimate_text_tokens(
-            DEFAULT_DAILY_SCHEDULE_SYSTEM_PROMPT + "\n" + base_prompt
-        )
-        return max(0, target_input_tokens - base_tokens)
-
-    def _provider_context_limit(self, provider_id: str) -> int | None:
-        try:
-            provider = self.context.get_provider_by_id(provider_id)
-        except Exception:
-            provider = None
-        if provider is None:
-            return None
-
-        provider_config = getattr(provider, "provider_config", {})
-        if isinstance(provider_config, dict):
-            try:
-                configured = int(provider_config.get("max_context_tokens", 0) or 0)
-            except (TypeError, ValueError):
-                configured = 0
-            if configured > 0:
-                return configured
-
-        try:
-            model = str(provider.get_model() or "").strip()
-            from astrbot.core.utils.llm_metadata import LLM_METADATAS
-
-            metadata = LLM_METADATAS.get(model)
-            metadata = metadata if isinstance(metadata, dict) else {}
-            limits = metadata.get("limit", {})
-            limits = limits if isinstance(limits, dict) else {}
-            limit = limits.get("context", 0)
-            parsed = int(limit or 0)
-            return parsed if parsed > 0 else None
-        except Exception:
-            return None
-
-    @classmethod
-    def _trim_previous_day_state(cls, value: dict, budget: int) -> dict | None:
-        if budget <= 0 or not isinstance(value, dict):
-            return None
-        core = {
-            "boundary_state": value.get("boundary_state", {}),
-            "boundary_date": str(value.get("boundary_date", "") or ""),
-        }
-        if estimate_text_tokens(json_block("PREVIOUS_DAY_STATE", core)) > budget:
-            return None
-        schedules = value.get("actual_schedules", [])
-        if not isinstance(schedules, list) or not schedules:
-            return core
-        candidate = {**core, "actual_schedules": []}
-        if estimate_text_tokens(
-            json_block("PREVIOUS_DAY_STATE", candidate)
-        ) > budget:
-            return core
-        # 优先保留最近几天（列表为 旧→新，先倒序保留最近，再恢复顺序）
-        kept: list[dict] = []
-        for entry in reversed(schedules):
-            if not isinstance(entry, dict):
-                continue
-            candidate = {**core, "actual_schedules": [*kept, entry]}
-            if estimate_text_tokens(
-                json_block("PREVIOUS_DAY_STATE", candidate)
-            ) > budget:
-                break
-            kept.append(entry)
-        kept.reverse()
-        return {**core, "actual_schedules": kept}
-
-    @classmethod
-    def _trim_recent_schedules_text(cls, text: str, budget: int) -> str:
-        if budget <= 0 or not text:
-            return ""
-        try:
-            entries = json.loads(text)
-        except (TypeError, ValueError):
-            return ""
-        if not isinstance(entries, list):
-            return ""
-        kept = []
-        for entry in entries:
-            candidate = json.dumps([*kept, entry], ensure_ascii=False, sort_keys=True)
-            block = json_block("RECENT_SCHEDULES", {"content": candidate})
-            if estimate_text_tokens(block) > budget:
-                break
-            kept.append(entry)
-        return json.dumps(kept, ensure_ascii=False, sort_keys=True) if kept else ""
-
     # ---------------- Provider / Persona ----------------
 
     async def _resolve_provider_id(self) -> str:
@@ -832,16 +629,51 @@ class DailyScheduleGeneration:
         return provider_id
 
     async def _resolve_persona_prompt(self, session: str, persona: Any | None) -> str:
-        """从 persona 提取 prompt；未传入时回退自行解析。"""
+        """从 persona 提取 prompt；未传入时回退自行解析。
+
+        启用预萃取时用摘要替代全量人设（实测输入 −43~53%，且能避免被话术示例带偏）；
+        萃取失败一律回退全量人设——宁可多花 token，也不用人设残缺的摘要去生成。
+        """
         generation_config = self._generation_config()
         if not generation_config.get("use_persona", True):
             return ""
         if persona is None:
             try:
                 _, persona = await self._persona_resolver(self.context, session)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    f"{tag()} ⚠️ 解析 Persona 失败（{type(exc).__name__}），本次不注入人设"
+                )
                 return ""
-        return extract_persona_prompt(persona)
+        full_prompt = extract_persona_prompt(persona)
+        if not full_prompt or self._persona_summary is None:
+            return full_prompt
+        try:
+            try:
+                fallback_provider = await self._resolve_provider_id()
+            except Exception as exc:
+                # 拿不到生成模型时不阻断：摘要服务自己的 provider_id 可能已单独配置
+                logger.debug(
+                    f"{tag()} 取不到生成模型（{type(exc).__name__}），"
+                    "摘要模型需自行配置"
+                )
+                fallback_provider = ""
+            result = await self._persona_summary.ensure(
+                full_prompt,
+                fallback_provider_id=fallback_provider,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"{tag()} ⚠️ 人设摘要链路异常（{type(exc).__name__}），本次改用全量人设"
+            )
+            return full_prompt
+        if result.usable:
+            logger.debug(
+                f"{tag()} 人设摘要命中: status={result.status} "
+                f"{len(full_prompt)} → {len(result.text)} 字"
+            )
+            return result.text
+        return full_prompt
 
     # ---------------- Prompt ----------------
 
@@ -870,19 +702,17 @@ class DailyScheduleGeneration:
         )
         policy = await self.policy()
         calls = 0
-        gate_timeouts = 0
-        for attempt in range(policy.max_attempts):
+        for attempt in range(max(1, policy.max_attempts)):
             if attempt > 0:
                 await self._sleep(_retry_delay_seconds(attempt))
-            held = await self._gate.acquire(policy.acquire_timeout_seconds)
-            if not held:
-                gate_timeouts += 1
-                continue
+            await self._gate.acquire_wait(policy.max_concurrent_llm)
             try:
                 try:
                     calls += 1
                     boundary = await evaluate_boundary(
-                        self.context, provider_id=provider_id, prompt=prompt)
+                        self.context, provider_id=provider_id, prompt=prompt,
+                        max_attempts=policy.max_attempts,
+                    )
                     return (
                         self._fill_boundary(boundary, enhanced),
                         calls,
@@ -896,8 +726,6 @@ class DailyScheduleGeneration:
                     continue
             finally:
                 await self._gate.release()
-        if calls == 0 and gate_timeouts:
-            return None, 0, ["boundary:concurrency_timeout"]
         return None, calls, ["boundary:evaluation_failed"]
 
     @staticmethod
